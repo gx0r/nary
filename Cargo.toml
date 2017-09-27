@@ -1,0 +1,16 @@
+[package]
+name = "nary"
+version = "0.1.0"
+authors = ["Grant Miner <>"]
+
+[dependencies]
+serde_json = "^1.0"
+hyper = "^0.10"
+hyper-native-tls = "^0.2.2"
+tar = "^0.4"
+flate2 = "^0.2"
+indicatif = "^0.3"
+semver = "^0.8.0"
+lazy_static = "^0.2"
+error-chain = "^0.10.0"
+percent-encoding = "1.0.0"
