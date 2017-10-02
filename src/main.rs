@@ -49,13 +49,19 @@ use errors::*;
 
 fn main() {
     if let Err(ref e) = install(&Path::new("."), false) {
-        use std::io::Write;
-        use error_chain::ChainedError; // trait which holds `display`
-        let stderr = &mut ::std::io::stderr();
-        let errmsg = "Error writing to stderr";
+      use std::io::Write;
+      use error_chain::ChainedError; // trait which holds `display_chain`
+      let stderr = &mut ::std::io::stderr();
+      let errmsg = "Error writing to stderr";
 
-        writeln!(stderr, "{}", e.display()).expect(errmsg);
-        ::std::process::exit(1);
+      writeln!(stderr, "{}", e.display_chain()).expect(errmsg);
+
+      // The backtrace is not always generated. `RUST_BACKTRACE=1`.
+      if let Some(backtrace) = e.backtrace() {
+        writeln!(stderr, "backtrace: {:?}", backtrace).expect(errmsg);
+      }
+
+      ::std::process::exit(1);
     }
 }
 
@@ -126,7 +132,7 @@ fn install_deps(root_path: &Path,
                 if let Some(x) = version.rfind('#') {
                     let (repo, hash) = version.clone().split_at(x);
                     let _repo = match Repository::clone(repo, &path) {
-                        Ok(repo) => {                            
+                        Ok(repo) => {
                             {
                                 let mut hash = hash.clone().to_string();
                                 hash.remove(0);
@@ -138,7 +144,7 @@ fn install_deps(root_path: &Path,
                                 };
                             }
                             repo
-                        },
+                        }
                         Err(e) => bail!("failed to clone: {}", e),
                     };
                 } else {
@@ -164,8 +170,9 @@ fn install_deps(root_path: &Path,
                 }
                 None => (),
             }
-            let url = format!("{}{}", "https://registry.npmjs.org/", utf8_percent_encode(key,
-               percent_encoding::PATH_SEGMENT_ENCODE_SET));
+            let url = format!("{}{}",
+                              "https://registry.npmjs.org/",
+                              utf8_percent_encode(key, percent_encoding::PATH_SEGMENT_ENCODE_SET));
 
             // println!("{}", &url);
 
