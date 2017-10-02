@@ -10,6 +10,7 @@ extern crate flate2;
 extern crate semver;
 extern crate indicatif;
 extern crate percent_encoding;
+extern crate git2;
 
 use serde_json::Value;
 use std::fs::File;
@@ -112,9 +113,44 @@ fn install_deps(root_path: &Path,
 
     // https://docs.serde.rs/serde_json/map/struct.Iter.html
     for (key, vers) in deps.iter() {
-        // println!("key: {:?} version: {:?}", key, vers);
+        println!("Installing {:?} version: {:?}", key, vers);
 
         if let Some(version) = vers.as_str() {
+
+            if version.starts_with("git://") {
+                use git2::Repository;
+                let mut path = root_path.clone().to_path_buf();
+                path.push("node_modules");
+                path.push(key);
+
+                if let Some(x) = version.rfind('#') {
+                    let (repo, hash) = version.clone().split_at(x);
+                    let _repo = match Repository::clone(repo, &path) {
+                        Ok(repo) => {                            
+                            {
+                                let mut hash = hash.clone().to_string();
+                                hash.remove(0);
+                                println!("hash: {}", hash);
+                                let obj = repo.revparse_single(&hash);
+                                match obj {
+                                    Ok(o) => repo.checkout_tree(&o, None),
+                                    Err(e) => bail!("failed to clone: {}", e),
+                                };
+                            }
+                            repo
+                        },
+                        Err(e) => bail!("failed to clone: {}", e),
+                    };
+                } else {
+                    let _repo = match Repository::clone(version, &path) {
+                        Ok(repo) => repo,
+                        Err(e) => bail!("failed to clone: {}", e),
+                    };
+                }
+                continue;
+            }
+
+
             let required_version = VersionReq::parse(version).chain_err(|| format!("Version {} of {} didn't parse", version, key))?;
             match installed_deps.get(key) {
                 Some(installed_version) => {
