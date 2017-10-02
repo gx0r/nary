@@ -1,16 +1,15 @@
 #![recursion_limit = "1024"]
 #[macro_use]
 extern crate error_chain;
-// #[macro_use] extern crate lazy_static;
-extern crate serde_json;
+extern crate flate2;
+extern crate git2;
 extern crate hyper;
 extern crate hyper_native_tls;
-extern crate tar;
-extern crate flate2;
-extern crate semver;
 extern crate indicatif;
 extern crate percent_encoding;
-extern crate git2;
+extern crate semver;
+extern crate serde_json;
+extern crate tar;
 
 use serde_json::Value;
 use std::fs::File;
@@ -30,7 +29,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::create_dir_all;
 use std::env::home_dir;
-use hyper::header::{Headers, UserAgent, Encoding, AcceptEncoding, qitem};
+use hyper::header::{qitem, AcceptEncoding, Encoding, Headers, UserAgent};
 use hyper::Url;
 use percent_encoding::utf8_percent_encode;
 
@@ -49,19 +48,19 @@ use errors::*;
 
 fn main() {
     if let Err(ref e) = install(&Path::new("."), false) {
-      use std::io::Write;
-      use error_chain::ChainedError; // trait which holds `display_chain`
-      let stderr = &mut ::std::io::stderr();
-      let errmsg = "Error writing to stderr";
+        use std::io::Write;
+        use error_chain::ChainedError; // trait which holds `display_chain`
+        let stderr = &mut ::std::io::stderr();
+        let errmsg = "Error writing to stderr";
 
-      writeln!(stderr, "{}", e.display_chain()).expect(errmsg);
+        writeln!(stderr, "{}", e.display_chain()).expect(errmsg);
 
-      // The backtrace is not always generated. `RUST_BACKTRACE=1`.
-      if let Some(backtrace) = e.backtrace() {
-        writeln!(stderr, "backtrace: {:?}", backtrace).expect(errmsg);
-      }
+        // The backtrace is not always generated. `RUST_BACKTRACE=1`.
+        if let Some(backtrace) = e.backtrace() {
+            writeln!(stderr, "backtrace: {:?}", backtrace).expect(errmsg);
+        }
 
-      ::std::process::exit(1);
+        ::std::process::exit(1);
     }
 }
 
@@ -72,39 +71,44 @@ fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<()> {
     return install_helper(root_path, install_dev_dependencies, &installed_deps);
 }
 
-fn install_helper(root_path: &Path,
-                  install_dev_dependencies: bool,
-                  installed_deps: &HashMap<String, semver::Version>)
-                  -> Result<()> {
-
+fn install_helper(
+    root_path: &Path,
+    install_dev_dependencies: bool,
+    installed_deps: &HashMap<String, semver::Version>,
+) -> Result<()> {
     let mut package = root_path.to_path_buf();
     package.push("package.json");
 
     let mut package_json = File::open(package).chain_err(|| "Failed to open package.json.")?;
 
     let mut contents = String::new();
-    package_json.read_to_string(&mut contents).chain_err(|| "Failed to read package.json.")?;
+    package_json
+        .read_to_string(&mut contents)
+        .chain_err(|| "Failed to read package.json.")?;
 
     let v: Value =
         serde_json::from_str(&contents).chain_err(|| "Failed to deserialize package.json.")?;
 
     if let Some(deps) = v["dependencies"].as_object() {
-        install_deps(root_path, deps, &installed_deps).chain_err(|| "Failed to install a dependency.")?;
+        install_deps(root_path, deps, &installed_deps)
+            .chain_err(|| "Failed to install a dependency.")?;
     }
 
     if install_dev_dependencies {
         if let Some(dev_deps) = v["devDependencies"].as_object() {
-            install_deps(root_path, dev_deps, &installed_deps).chain_err(|| "Failed to install a dev dependency.")?;
+            install_deps(root_path, dev_deps, &installed_deps)
+                .chain_err(|| "Failed to install a dev dependency.")?;
         }
     }
 
     Ok(())
 }
 
-fn install_deps(root_path: &Path,
-                deps: &serde_json::Map<String, serde_json::Value>,
-                installed_deps: &HashMap<String, semver::Version>)
-                -> Result<()> {
+fn install_deps(
+    root_path: &Path,
+    deps: &serde_json::Map<String, serde_json::Value>,
+    installed_deps: &HashMap<String, semver::Version>,
+) -> Result<()> {
     let ssl = NativeTlsClient::new().chain_err(|| "Unable to create a NativeTlsClient")?;
     let connector = HttpsConnector::new(ssl);
 
@@ -122,7 +126,6 @@ fn install_deps(root_path: &Path,
         println!("Installing {:?} version: {:?}", key, vers);
 
         if let Some(version) = vers.as_str() {
-
             if version.starts_with("git://") {
                 use git2::Repository;
                 let mut path = root_path.clone().to_path_buf();
@@ -157,28 +160,32 @@ fn install_deps(root_path: &Path,
             }
 
 
-            let required_version = VersionReq::parse(version).chain_err(|| format!("Version {} of {} didn't parse", version, key))?;
+            let required_version = VersionReq::parse(version)
+                .chain_err(|| format!("Version {} of {} didn't parse", version, key))?;
             match installed_deps.get(key) {
-                Some(installed_version) => {
-                    if required_version.matches(installed_version) {
-                        println!("Already have {} @ {}; don't need to install {}",
-                                 key,
-                                 installed_version,
-                                 required_version);
-                        continue;
-                    }
-                }
+                Some(installed_version) => if required_version.matches(installed_version) {
+                    println!(
+                        "Already have {} @ {}; don't need to install {}",
+                        key,
+                        installed_version,
+                        required_version
+                    );
+                    continue;
+                },
                 None => (),
             }
-            let url = format!("{}{}",
-                              "https://registry.npmjs.org/",
-                              utf8_percent_encode(key, percent_encoding::PATH_SEGMENT_ENCODE_SET));
+            let url = format!(
+                "{}{}",
+                "https://registry.npmjs.org/",
+                utf8_percent_encode(key, percent_encoding::PATH_SEGMENT_ENCODE_SET)
+            );
 
             // println!("{}", &url);
 
             let mut body = String::new();
 
-            client.get(&url)
+            client
+                .get(&url)
                 .send()
                 .chain_err(|| format!("Couldn't GET URL: {}", url))?
                 .read_to_string(&mut body)
@@ -186,12 +193,16 @@ fn install_deps(root_path: &Path,
 
             // println!("{}", &body);
 
-            let metadata: Value = serde_json::from_str(&body).chain_err(|| format!("Couldn't JSON parse metadata from {}", url))?;
-            let versions = &metadata["versions"].as_object()
+            let metadata: Value = serde_json::from_str(&body)
+                .chain_err(|| format!("Couldn't JSON parse metadata from {}", url))?;
+            let versions = &metadata["versions"]
+                .as_object()
                 .ok_or_else(|| format!("Versions was not a JSON object. {}", url))?;
 
             for version in versions.iter().rev() {
-                if required_version.matches(&Version::parse(version.0.as_str()).chain_err(|| format!("{} didn't parse", version.0))?) {
+                if required_version.matches(&Version::parse(version.0.as_str())
+                    .chain_err(|| format!("{} didn't parse", version.0))?)
+                {
                     // let version = &versions[version];
                     // println!("Version: \n{:?}", version);
 
@@ -201,17 +212,23 @@ fn install_deps(root_path: &Path,
                     // let dis = version.1;
 
                     // println!("Dist: {}", dist);
-                    let tarball_url = Url::parse(&dist["tarball"].as_str().ok_or_else(|| format!("tarball URL didn't convert to string"))?)
-                        .chain_err(|| "Couldn't parse URL")?;
+                    let tarball_url = Url::parse(
+                        &dist["tarball"]
+                            .as_str()
+                            .ok_or_else(|| format!("tarball URL didn't convert to string"))?,
+                    ).chain_err(|| "Couldn't parse URL")?;
                     // let url = Url::parse(tarball_url);
                     // println!("Tarball URL: {:?}", &tarball_url);
 
                     let mut tarball_res = Vec::new();
-                    { // cache
+                    {
+                        // cache
 
                         let mut path = cache_dir.clone();
-                        path.push(&utf8_percent_encode(key,
-                            percent_encoding::PATH_SEGMENT_ENCODE_SET).to_string());
+                        path.push(&utf8_percent_encode(
+                            key,
+                            percent_encoding::PATH_SEGMENT_ENCODE_SET,
+                        ).to_string());
                         let _ = fs::create_dir(&path);
                         path.push(&version.0);
                         let _ = fs::create_dir(&path);
@@ -220,7 +237,11 @@ fn install_deps(root_path: &Path,
                         let cache_file = File::open(&path);
 
                         if cache_file.is_ok() {
-                            cache_file.ok().unwrap().read_to_end(&mut tarball_res).chain_err(|| "Couldn't cache file")?;
+                            cache_file
+                                .ok()
+                                .unwrap()
+                                .read_to_end(&mut tarball_res)
+                                .chain_err(|| "Couldn't cache file")?;
                             println!("Read {} from cache", path.to_string_lossy());
                         } else {
                             client.get(tarball_url.clone())
@@ -233,9 +254,12 @@ fn install_deps(root_path: &Path,
                             // client.get(&*url).send().chain_err(|| format!("Couldn't GET URL: {}", url))?.read_to_string(&mut body)
                             // .chain_err(|| format!("Couldn't ready body of: {}", url))?;
 
-                            let mut cache_file = File::create(&path).chain_err(|| "Coudln't cache file")?;
+                            let mut cache_file =
+                                File::create(&path).chain_err(|| "Coudln't cache file")?;
                             println!("Caching {}", path.to_string_lossy());
-                            cache_file.write(tarball_res.as_slice()).chain_err(|| "Couldn't write to cache file")?;
+                            cache_file
+                                .write(tarball_res.as_slice())
+                                .chain_err(|| "Couldn't write to cache file")?;
                         }
                     }
 
@@ -246,7 +270,8 @@ fn install_deps(root_path: &Path,
                     let mut d = GzDecoder::new(tarball_res.as_slice())
                         .chain_err(|| format!("Couldn't gunzip {}", tarball_url))?;
                     let mut vec = Vec::new();
-                    let _ = d.read_to_end(&mut vec).chain_err(|| format!("Couldn't 2nd read to end of {}", tarball_url))?;
+                    let _ = d.read_to_end(&mut vec)
+                        .chain_err(|| format!("Couldn't 2nd read to end of {}", tarball_url))?;
 
                     let mut a = Archive::new(vec.as_slice());
 
@@ -254,7 +279,10 @@ fn install_deps(root_path: &Path,
                     path.push("node_modules");
                     path.push(key);
 
-                    for (key, entry) in a.entries().chain_err(|| format!("{} didn't provide file entries", tarball_url))?.enumerate() {
+                    for (key, entry) in a.entries()
+                        .chain_err(|| format!("{} didn't provide file entries", tarball_url))?
+                        .enumerate()
+                    {
                         // Make sure there wasn't an I/O error
 
                         if entry.is_ok() {
@@ -263,15 +291,28 @@ fn install_deps(root_path: &Path,
                             // println!("{:?}", entry.header().path().unwrap());
                             // println!("{}", entry.header().size().unwrap());
 
-                            let mut entry_header = entry.header().path().chain_err(|| format!("Tarball {} had a bad entry path: {}", tarball_url, key))?.into_owned();
+                            let mut entry_header = entry
+                                .header()
+                                .path()
+                                .chain_err(|| {
+                                    format!("Tarball {} had a bad entry path: {}", tarball_url, key)
+                                })?
+                                .into_owned();
 
                             if entry_header.is_absolute() {
                                 bail!("{:?} is absolute from {}", entry_header, tarball_url);
                             }
 
                             if entry_header.strip_prefix("package/").is_ok() {
-                                entry_header = entry_header.strip_prefix("package/")
-                                    .chain_err(|| format!("Tarball {} had no package/ prefix for {}", tarball_url, key))?
+                                entry_header = entry_header
+                                    .strip_prefix("package/")
+                                    .chain_err(|| {
+                                        format!(
+                                            "Tarball {} had no package/ prefix for {}",
+                                            tarball_url,
+                                            key
+                                        )
+                                    })?
                                     .to_path_buf();
                             }
 
@@ -284,16 +325,20 @@ fn install_deps(root_path: &Path,
 
                             let mut dir_path = file_path.clone();
                             dir_path.pop();
-                            create_dir_all(&dir_path).chain_err(|| format!("Couldn't create dir {} for {}", file_path.display(), key))?;
-                            entry.unpack(&file_path).chain_err(|| format!("Couldn't unpack {} for {}", file_path.display(), key))?;
+                            create_dir_all(&dir_path).chain_err(|| {
+                                format!("Couldn't create dir {} for {}", file_path.display(), key)
+                            })?;
+                            entry.unpack(&file_path).chain_err(|| {
+                                format!("Couldn't unpack {} for {}", file_path.display(), key)
+                            })?;
                         } else {
                             eprintln!("Tarball {} had a bad entry {}", tarball_url, key);
                             // let mut entry = entry.chain_err(|| format!("Tarball {} had a bad entry {}", tarball_url, key))?;
                         }
-
                     }
 
-                    let version_to_insert = Version::parse(version.0.as_str()).chain_err(|| format!("{} didn't parse", version.0))?;
+                    let version_to_insert = Version::parse(version.0.as_str())
+                        .chain_err(|| format!("{} didn't parse", version.0))?;
                     installed_deps.insert(key.to_string(), version_to_insert);
 
                     next_paths.insert(path);
