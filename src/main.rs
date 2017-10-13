@@ -22,14 +22,12 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::path::Path;
-use std::sync::Arc;
 use semver::{Version, VersionReq};
-use indicatif::ProgressBar;
+// use indicatif::ProgressBar;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::create_dir_all;
 use std::env::home_dir;
-use hyper::header::{qitem, AcceptEncoding, Encoding, Headers, UserAgent};
 use hyper::Url;
 use percent_encoding::utf8_percent_encode;
 
@@ -125,7 +123,14 @@ fn install_deps(
     for (key, vers) in deps.iter() {
         println!("Installing {:?} version: {:?}", key, vers);
 
-        if let Some(version) = vers.as_str() {
+        if let Some(mut version) = vers.as_str() {
+
+            if version.find("||").is_some() {
+                let x: Vec<&str> = version.split("||").collect();
+                version = x.last().unwrap();
+                println!("Installing {:?} version: {:?}", key, version);
+            };
+
             if version.starts_with("git://") {
                 use git2::Repository;
                 let mut path = root_path.clone().to_path_buf();
