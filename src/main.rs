@@ -33,6 +33,9 @@ use std::env::home_dir;
 use hyper::Url;
 use percent_encoding::utf8_percent_encode;
 
+#[derive(Fail, Debug)]
+#[fail(display = "Needs a Home Directory")]
+pub struct NeedHomeDir;
 
 // lazy_static! {
 //     static ref PROGRESS_BAR: Arc<ProgressBar> = {
@@ -51,7 +54,7 @@ fn main() {
         writeln!(stderr, "{}", err).expect(errmsg);
 
         let mut fail = err.cause();
-        while let Some(cause) = fail.cause() {
+            while let Some(cause) = fail.cause() {
             writeln!(stderr, "{}", cause).expect(errmsg);
 
             // Make `fail` the reference to the cause of the previous fail, making the
@@ -106,9 +109,6 @@ fn install_helper(
     Ok(())
 }
 
-#[derive(Fail, Debug)]
-#[fail(display = "Needs a Home Directory")]
-pub struct NeedHomeDir;
 
 fn install_deps(
     root_path: &Path,
@@ -299,8 +299,6 @@ fn install_deps(
                                 .into_owned();
 
                             if entry_header.is_absolute() {
-                                // TODO
-                                // bail!("{:?} is absolute from {}", entry_header, tarball_url);
                                 return Err(format_err!("{:?} is absolute from {}", entry_header, tarball_url));
                             }
 
@@ -348,7 +346,6 @@ fn install_deps(
                 }
             }
         } else {
-            // bail!(format!("A version of {} wasn't string parsable.", key));
             return Err(format_err!("A version of {} wasn't string parsable.", key));
         }
     }
