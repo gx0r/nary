@@ -162,7 +162,7 @@ fn install_deps(
 
 
             let required_version = VersionReq::parse(version)
-                .context(format!("Version {} of {} didn't parse", version, key))?;
+                .with_context(|_| format!("Version {} of {} didn't parse", version, key))?;
             match installed_deps.get(key) {
                 Some(installed_version) => if required_version.matches(installed_version) {
                     println!(
@@ -188,21 +188,21 @@ fn install_deps(
             client
                 .get(&url)
                 .send()
-                .context(format!("Couldn't GET URL: {}", url))?
+                .with_context(|_| format!("Couldn't GET URL: {}", url))?
                 .read_to_string(&mut body)
-                .context(format!("Couldn't ready body of: {}", url))?;
+                .with_context(|_| format!("Couldn't ready body of: {}", url))?;
 
             // println!("{}", &body);
 
             let metadata: Value = serde_json::from_str(&body)
-                .context(format!("Couldn't JSON parse metadata from {}", url))?;
+                .with_context(|_| format!("Couldn't JSON parse metadata from {}", url))?;
             let versions = &metadata["versions"]
                 .as_object()
                 .ok_or(format_err!("Versions was not a JSON object. {}", url))?;
 
             for version in versions.iter().rev() {
                 if required_version.matches(&Version::parse(version.0.as_str())
-                    .context(format_err!("{} didn't parse", version.0))?)
+                    .with_context(|_| format_err!("{} didn't parse", version.0))?)
                 {
                     // let version = &versions[version];
                     // println!("Version: \n{:?}", version);
@@ -248,15 +248,15 @@ fn install_deps(
                             client.get(tarball_url.clone())
                                 // .header(AcceptEncoding(vec![qitem(Encoding::Gzip)]))
                                 .send()
-                                .context(format!("Couldn't get tarball: {:?}", &tarball_url))?
+                                .with_context(|_| format!("Couldn't get tarball: {:?}", &tarball_url))?
                                 .read_to_end(&mut tarball_res)
-                                .context(format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
+                                .with_context(|_| format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
 
                             // client.get(&*url).send().context(format!("Couldn't GET URL: {}", url))?.read_to_string(&mut body)
                             // .context(format!("Couldn't ready body of: {}", url))?;
 
                             let mut cache_file =
-                                File::create(&path).context("Coudln't cache file")?;
+                                File::create(&path).context("Couldn't cache file")?;
                             println!("Caching {}", path.to_string_lossy());
                             cache_file
                                 .write(tarball_res.as_slice())
@@ -269,10 +269,10 @@ fn install_deps(
 
                     use flate2::read::GzDecoder;
                     let mut d = GzDecoder::new(tarball_res.as_slice())
-                        .context(format!("Couldn't gunzip {}", tarball_url))?;
+                        .with_context(|_| format!("Couldn't gunzip {}", tarball_url))?;
                     let mut vec = Vec::new();
                     let _ = d.read_to_end(&mut vec)
-                        .context(format!("Couldn't 2nd read to end of {}", tarball_url))?;
+                        .with_context(|_| format!("Couldn't 2nd read to end of {}", tarball_url))?;
 
                     let mut a = Archive::new(vec.as_slice());
 
@@ -281,7 +281,7 @@ fn install_deps(
                     path.push(key);
 
                     for (key, entry) in a.entries()
-                        .context(format!("{} didn't provide file entries", tarball_url))?
+                        .with_context(|_| format!("{} didn't provide file entries", tarball_url))?
                         .enumerate()
                     {
                         // Make sure there wasn't an I/O error
@@ -295,7 +295,7 @@ fn install_deps(
                             let mut entry_header = entry
                                 .header()
                                 .path()
-                                .context(format!("Tarball {} had a bad entry path: {}", tarball_url, key))?
+                                .with_context(|_| format!("Tarball {} had a bad entry path: {}", tarball_url, key))?
                                 .into_owned();
 
                             if entry_header.is_absolute() {
@@ -305,13 +305,7 @@ fn install_deps(
                             if entry_header.strip_prefix("package/").is_ok() {
                                 entry_header = entry_header
                                     .strip_prefix("package/")
-                                    .context({
-                                        format!(
-                                            "Tarball {} had no package/ prefix for {}",
-                                            tarball_url,
-                                            key
-                                        )
-                                    })?
+                                    .with_context(|_| format!("Tarball {} had no package/ prefix for {}", tarball_url, key))?
                                     .to_path_buf();
                             }
 
@@ -324,20 +318,16 @@ fn install_deps(
 
                             let mut dir_path = file_path.clone();
                             dir_path.pop();
-                            create_dir_all(&dir_path).context({
-                                format!("Couldn't create dir {} for {}", file_path.display(), key)
-                            })?;
-                            entry.unpack(&file_path).context({
-                                format!("Couldn't unpack {} for {}", file_path.display(), key)
-                            })?;
+                            create_dir_all(&dir_path).with_context(|_| format!("Couldn't create dir {} for {}", file_path.display(), key))?;
+                            entry.unpack(&file_path).with_context(|_| format!("Couldn't unpack {} for {}", file_path.display(), key))?;
                         } else {
                             eprintln!("Tarball {} had a bad entry {}", tarball_url, key);
-                            // let mut entry = entry.context(|| format!("Tarball {} had a bad entry {}", tarball_url, key))?;
+                            // let mut entry = entry.with_context(|_| format!("Tarball {} had a bad entry {}", tarball_url, key))?;
                         }
                     }
 
                     let version_to_insert = Version::parse(version.0.as_str())
-                        .context(format!("{} didn't parse", version.0))?;
+                        .with_context(|_| format!("{} didn't parse", version.0))?;
                     installed_deps.insert(key.to_string(), version_to_insert);
 
                     next_paths.insert(path);
