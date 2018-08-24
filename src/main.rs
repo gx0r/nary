@@ -268,8 +268,7 @@ fn install_deps(
                     // let _ = tarball_res.read_to_end(&mut ball).context(format!("Couldn't read to end of {}", tarball_url))?;
 
                     use flate2::read::GzDecoder;
-                    let mut d = GzDecoder::new(tarball_res.as_slice())
-                        .with_context(|_| format!("Couldn't gunzip {}", tarball_url))?;
+                    let mut d = GzDecoder::new(tarball_res.as_slice());
                     let mut vec = Vec::new();
                     let _ = d.read_to_end(&mut vec)
                         .with_context(|_| format!("Couldn't 2nd read to end of {}", tarball_url))?;
