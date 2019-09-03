@@ -7,7 +7,7 @@ extern crate hyper;
 extern crate hyper_native_tls;
 extern crate indicatif;
 extern crate percent_encoding;
-extern crate semver;
+extern crate semver_rs as semver;
 extern crate serde_json;
 extern crate tar;
 use failure::Error;
@@ -24,7 +24,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::path::Path;
-use semver::{Version, VersionReq};
+use semver::{Version, Range};
 // use indicatif::ProgressBar;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -71,7 +71,7 @@ fn main() {
 
 fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<(), Error> {
     let _ = fs::create_dir("node_modules");
-    let installed_deps: HashMap<String, semver::Version> = HashMap::new();
+    let installed_deps: HashMap<String, Version> = HashMap::new();
 
     return install_helper(root_path, install_dev_dependencies, &installed_deps);
 }
@@ -79,7 +79,7 @@ fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<(), Error
 fn install_helper(
     root_path: &Path,
     install_dev_dependencies: bool,
-    installed_deps: &HashMap<String, semver::Version>,
+    installed_deps: &HashMap<String, Version>,
 ) -> Result<(), Error> {
     let mut package = root_path.to_path_buf();
     package.push("package.json");
@@ -161,15 +161,15 @@ fn install_deps(
             }
 
 
-            let required_version = VersionReq::parse(version)
-                .with_context(|_| format!("Version {} of {} didn't parse", version, key))?;
+            let required_version = Range::new(version).parse()?;
+                // .with_context(|_| format!("Version {} of {} didn't parse", version, key))?;
             match installed_deps.get(key) {
-                Some(installed_version) => if required_version.matches(installed_version) {
+                Some(installed_version) => if required_version.test(installed_version) {
                     println!(
-                        "Already have {} @ {}; don't need to install {}",
+                        "Already have {} @ {}; don't need to install",
                         key,
                         installed_version,
-                        required_version
+                        // required_version
                     );
                     continue;
                 },
@@ -201,7 +201,7 @@ fn install_deps(
                 .ok_or(format_err!("Versions was not a JSON object. {}", url))?;
 
             for version in versions.iter().rev() {
-                if required_version.matches(&Version::parse(version.0.as_str())
+                if required_version.test(&Version::new(version.0.as_str()).parse()
                     .with_context(|_| format_err!("{} didn't parse", version.0))?)
                 {
                     // let version = &versions[version];
@@ -325,7 +325,7 @@ fn install_deps(
                         }
                     }
 
-                    let version_to_insert = Version::parse(version.0.as_str())
+                    let version_to_insert = Version::new(version.0.as_str()).parse()
                         .with_context(|_| format!("{} didn't parse", version.0))?;
                     installed_deps.insert(key.to_string(), version_to_insert);
 
