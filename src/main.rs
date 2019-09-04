@@ -84,7 +84,8 @@ fn install_helper(
     let mut package = root_path.to_path_buf();
     package.push("package.json");
 
-    let mut package_json = File::open(package).context("Failed to open package.json.")?;
+    let mut package_json = File::open(package)
+        .context(format!("Failed to open package.json of: {}", root_path.to_string_lossy()))?;
 
     let mut contents = String::new();
     package_json
@@ -92,17 +93,18 @@ fn install_helper(
         .context("Failed to read package.json.")?;
 
     let v: Value =
-        serde_json::from_str(&contents).context("Failed to deserialize package.json.")?;
+        serde_json::from_str(&contents)
+        .context(format!("Failed to deserialize package.json of: {}", root_path.to_string_lossy()))?;
 
     if let Some(deps) = v["dependencies"].as_object() {
         install_deps(root_path, deps, &installed_deps)
-            .context("Failed to install a dependency.")?;
+            .context(format!("Failed to install a dependency of: {}", root_path.to_string_lossy()))?;
     }
 
     if install_dev_dependencies {
         if let Some(dev_deps) = v["devDependencies"].as_object() {
             install_deps(root_path, dev_deps, &installed_deps)
-                .context("Failed to install a dev dependency.")?;
+                .context(format!("Failed to install a dev dependency of: {}", root_path.to_string_lossy()))?;
         }
     }
 
@@ -161,15 +163,15 @@ fn install_deps(
             }
 
 
-            let required_version = Range::new(version).parse()?;
-                // .with_context(|_| format!("Version {} of {} didn't parse", version, key))?;
+            let required_version = Range::new(version).parse()
+                .with_context(|_| format!("Version {} of {} didn't parse", version, key))?;
             match installed_deps.get(key) {
                 Some(installed_version) => if required_version.test(installed_version) {
                     println!(
-                        "Already have {} @ {}; don't need to install",
+                        "Already have {} @ {}; don't need to install {}",
                         key,
                         installed_version,
-                        // required_version
+                        version
                     );
                     continue;
                 },
