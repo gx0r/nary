@@ -1,17 +1,17 @@
-#[macro_use] extern crate failure;
-#[macro_use] extern crate failure_derive;
-#[macro_use] extern crate serde_derive;
-extern crate flate2;
-extern crate git2;
-extern crate hyper;
-extern crate hyper_native_tls;
-extern crate indicatif;
-extern crate percent_encoding;
+#[macro_use]
+extern crate failure;
+#[macro_use]
+extern crate failure_derive;
+
+
+
+
+
+use percent_encoding;
 extern crate semver_rs as semver;
-extern crate serde_json;
-extern crate tar;
+use serde_json;
+
 use failure::Error;
-use failure::err_msg;
 use failure::ResultExt;
 use serde_json::Value;
 use std::fs::File;
@@ -24,7 +24,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::path::Path;
-use semver::{Version, Range};
+use crate::semver::{Version, Range};
 // use indicatif::ProgressBar;
 use std::collections::HashMap;
 use std::collections::HashSet;
