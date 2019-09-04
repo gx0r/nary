@@ -10,6 +10,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "bluebird": "3 || 4"
+    "bluebird": "2 || 3"
   }
 }
