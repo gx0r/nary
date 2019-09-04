@@ -43,7 +43,7 @@ fn main() {
 
         writeln!(stderr, "{}", err).expect(errmsg);
 
-        let mut fail = err.cause();
+        let mut fail = err.as_fail();
             while let Some(cause) = fail.cause() {
             writeln!(stderr, "{}", cause).expect(errmsg);
 
