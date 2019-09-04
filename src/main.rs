@@ -2,15 +2,8 @@
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
-
-
-
-
-
 use percent_encoding;
-extern crate semver_rs as semver;
 use serde_json;
-
 use failure::Error;
 use failure::ResultExt;
 use serde_json::Value;
@@ -24,12 +17,11 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::path::Path;
-use crate::semver::{Version, Range};
+use semver_rs::{Version, Range};
 // use indicatif::ProgressBar;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::create_dir_all;
-use std::env::home_dir;
 use hyper::Url;
 use percent_encoding::utf8_percent_encode;
 
@@ -46,9 +38,7 @@ pub struct NeedHomeDir;
 
 fn main() {
     if let Err(err) = install(&Path::new("."), false) {
-        use std::io::Write;
-
-        let stderr = &mut ::std::io::stderr();
+        let stderr = &mut std::io::stderr();
         let errmsg = "Error writing to stderr";
 
         writeln!(stderr, "{}", err).expect(errmsg);
@@ -115,7 +105,7 @@ fn install_helper(
 fn install_deps(
     root_path: &Path,
     deps: &serde_json::Map<String, serde_json::Value>,
-    installed_deps: &HashMap<String, semver::Version>,
+    installed_deps: &HashMap<String, Version>,
 ) -> Result<(), Error> {
     let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
     let connector = HttpsConnector::new(ssl);
@@ -125,7 +115,7 @@ fn install_deps(
     let mut next_paths: HashSet<PathBuf> = HashSet::new();
     let mut installed_deps = installed_deps.clone();
 
-    let mut cache_dir = home_dir().ok_or(NeedHomeDir)?;
+    let mut cache_dir = dirs::home_dir().ok_or(NeedHomeDir)?;
 
     cache_dir.push(".nary_cache");
     create_dir_all(&cache_dir).context("Couldn't create cache")?;
