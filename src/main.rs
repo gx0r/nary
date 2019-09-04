@@ -1,28 +1,38 @@
-#[macro_use]
-extern crate failure;
-#[macro_use]
-extern crate failure_derive;
-use percent_encoding;
-use serde_json;
-use failure::Error;
-use failure::ResultExt;
+use failure::{
+    Error,
+    ResultExt,
+    format_err,
+};
+use failure_derive::Fail;
 use serde_json::Value;
-use std::fs::File;
+use std::{
+    collections::{
+        HashMap,
+        HashSet,
+    },
+    fs,
+    fs::{
+        create_dir_all,
+        File,
+    },
+    io::{
+        Read,
+        Write,
+    },
+    path::{
+        PathBuf,
+        Path,
+    }
+};
 use tar::Archive;
-use std::fs;
-use hyper::Client;
-use hyper::net::HttpsConnector;
+use hyper::{
+    Client,
+    net::HttpsConnector,
+    Url,
+};
 use hyper_native_tls::NativeTlsClient;
-use std::io::Read;
-use std::io::Write;
-use std::path::PathBuf;
-use std::path::Path;
 use semver_rs::{Version, Range};
 // use indicatif::ProgressBar;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fs::create_dir_all;
-use hyper::Url;
 use percent_encoding::utf8_percent_encode;
 
 #[derive(Fail, Debug)]
