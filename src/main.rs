@@ -65,7 +65,7 @@ fn main() {
         // The backtrace is not always generated. `RUST_BACKTRACE=1`.
         writeln!(stderr, "{}", err.backtrace()).expect(errmsg);
 
-        ::std::process::exit(1);
+        std::process::exit(1);
     }
 }
 
@@ -90,7 +90,7 @@ fn install_helper(
     let mut contents = String::new();
     package_json
         .read_to_string(&mut contents)
-        .context("Failed to read package.json.")?;
+        .context(format!("Failed to read package.json of: {}", root_path.to_string_lossy()))?;
 
     let v: Value =
         serde_json::from_str(&contents)
