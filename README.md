@@ -1,7 +1,9 @@
 # nary
 Nary stands for "Nary is a Rusty Yarn"
 
-JavaScript package installer
+Experimental JavaScript package installer to see what writing one in Rust would be like.
+
+It is mostly experimental for now so no particular goals or ambitions yet. It does kind of work though.
 
 
 ## License
