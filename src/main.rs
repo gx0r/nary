@@ -134,13 +134,7 @@ fn install_deps(
     for (key, vers) in deps.iter() {
         println!("Installing {:?} version: {:?}", key, vers);
 
-        if let Some(mut version) = vers.as_str() {
-
-            if version.find("||").is_some() {
-                let x: Vec<&str> = version.split("||").collect();
-                version = x.last().unwrap();
-                println!("Installing {:?} version: {:?}", key, version);
-            };
+        if let Some(version) = vers.as_str() {
 
             if version.starts_with("git://") {
                 use git2::Repository;
