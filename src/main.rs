@@ -55,16 +55,17 @@ struct Opt {
     #[structopt(short, long, parse(from_occurrences))]
     verbose: u8,
 
-    // /// Install dev dependencies
-    // #[structopt(short = "d")]
-    // dev: bool,
+    /// Don't install any dev dependencies
+    #[structopt(long = "prod")]
+    production: bool,
 }
 
 fn main() {
     let opt = Opt::from_args();
-    println!("{:#?}", opt);
+    // println!("{:#?}", opt);
+    let install_dev_dependencies = !opt.production;
 
-    if let Err(err) = install(&Path::new("."), true) {
+    if let Err(err) = install(&Path::new("."), !install_dev_dependencies) {
         let stderr = &mut std::io::stderr();
         let errmsg = "Error writing to stderr";
 
