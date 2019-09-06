@@ -275,14 +275,14 @@ fn install_deps(
                     path.push("node_modules");
                     path.push(key);
 
-                    for (key, entry) in a.entries()
+                    for (key, file) in a.entries() // https://docs.rs/tar/0.4.26/tar/struct.Entries.html
                         .with_context(|_| format!("{} didn't provide file entries", tarball_url))?
                         .enumerate()
                     {
                         // Make sure there wasn't an I/O error
 
-                        if entry.is_ok() {
-                            let mut entry = entry.ok().unwrap();
+                        if file.is_ok() {
+                            let mut entry = file.ok().unwrap();
                             // Inspect metadata about the file
                             // println!("{:?}", entry.header().path().unwrap());
                             // println!("{}", entry.header().size().unwrap());
@@ -313,8 +313,10 @@ fn install_deps(
 
                             let mut dir_path = file_path.clone();
                             dir_path.pop();
-                            create_dir_all(&dir_path).with_context(|_| format!("Couldn't create dir {} for {}", file_path.display(), key))?;
-                            entry.unpack(&file_path).with_context(|_| format!("Couldn't unpack {} for {}", file_path.display(), key))?;
+                            create_dir_all(&dir_path)
+                                .with_context(|_| format!("Couldn't create dir {} for {}", file_path.display(), key))?;
+                            entry.unpack(&file_path)
+                                .with_context(|_| format!("Couldn't unpack {} for {}", file_path.display(), key))?;
                         } else {
                             eprintln!("Tarball {} had a bad entry {}", tarball_url, key);
                             // let mut entry = entry.with_context(|_| format!("Tarball {} had a bad entry {}", tarball_url, key))?;
