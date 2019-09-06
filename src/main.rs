@@ -45,9 +45,26 @@ pub struct NeedHomeDir;
 //         m
 //     };
 // }
+use structopt::StructOpt;
+
+/// nary
+#[derive(StructOpt, Debug)]
+#[structopt(name = "basic")]
+struct Opt {
+    /// Verbose mode (-v, -vv, -vvv, etc.)
+    #[structopt(short, long, parse(from_occurrences))]
+    verbose: u8,
+
+    // /// Install dev dependencies
+    // #[structopt(short = "d")]
+    // dev: bool,
+}
 
 fn main() {
-    if let Err(err) = install(&Path::new("."), false) {
+    let opt = Opt::from_args();
+    println!("{:#?}", opt);
+
+    if let Err(err) = install(&Path::new("."), true) {
         let stderr = &mut std::io::stderr();
         let errmsg = "Error writing to stderr";
 
@@ -73,7 +90,7 @@ fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<(), Error
     let _ = fs::create_dir("node_modules");
     let installed_deps: HashMap<String, Version> = HashMap::new();
 
-    return install_helper(root_path, install_dev_dependencies, &installed_deps);
+    return install_helper(root_path, false, &installed_deps);
 }
 
 fn install_helper(
@@ -110,7 +127,6 @@ fn install_helper(
 
     Ok(())
 }
-
 
 fn install_deps(
     root_path: &Path,
