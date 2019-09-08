@@ -129,6 +129,15 @@ fn install_helper(
     Ok(())
 }
 
+fn get_cache_dir() -> Result<PathBuf, Error> {
+    let mut cache_dir = dirs::home_dir().ok_or(NeedHomeDir)?;
+
+    cache_dir.push(".nary_cache");
+    create_dir_all(&cache_dir).context("Couldn't create cache")?;
+
+    Ok(cache_dir)
+}
+
 fn install_deps(
     root_path: &Path,
     deps: &serde_json::Map<String, serde_json::Value>,
@@ -142,10 +151,7 @@ fn install_deps(
     let mut next_paths: HashSet<PathBuf> = HashSet::new();
     let mut installed_deps = installed_deps.clone();
 
-    let mut cache_dir = dirs::home_dir().ok_or(NeedHomeDir)?;
-
-    cache_dir.push(".nary_cache");
-    create_dir_all(&cache_dir).context("Couldn't create cache")?;
+    let cache_dir = get_cache_dir()?;
 
     // https://docs.serde.rs/serde_json/map/struct.Iter.html
     for (key, vers) in deps.iter() {
