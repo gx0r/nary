@@ -151,37 +151,37 @@ fn cache(key: &str, version: &str, tarball_res: &mut Vec<u8>, tarball_url: &Url)
 
     let cache_file = File::open(&path);
 
-    if cache_file.is_ok() {
-        cache_file
-            .ok()
-            .unwrap()
-            .read_to_end(tarball_res)
-            .context("Couldn't cache file")?;
-        println!("Read {} from cache", path.to_string_lossy());
-    } else {
-        let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
-        let connector = HttpsConnector::new(ssl);
-        let client = Client::with_connector(connector);
+    match cache_file {
+        Ok(mut cache_file) => {            
+            cache_file.read_to_end(tarball_res)
+                .context("Couldn't cache file")?;
+            println!("Read {} from cache", path.to_string_lossy());
+            Ok(())
+        },
+        Err(_) => {
+             let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
+            let connector = HttpsConnector::new(ssl);
+            let client = Client::with_connector(connector);
 
-        client.get(tarball_url.clone())
-            // .header(AcceptEncoding(vec![qitem(Encoding::Gzip)]))
-            .send()
-            .with_context(|_| format!("Couldn't get tarball: {:?}", &tarball_url))?
-            .read_to_end(tarball_res)
-            .with_context(|_| format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
+            client.get(tarball_url.clone())
+                // .header(AcceptEncoding(vec![qitem(Encoding::Gzip)]))
+                .send()
+                .with_context(|_| format!("Couldn't get tarball: {:?}", &tarball_url))?
+                .read_to_end(tarball_res)
+                .with_context(|_| format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
 
-        // client.get(&*url).send().context(format!("Couldn't GET URL: {}", url))?.read_to_string(&mut body)
-        // .context(format!("Couldn't ready body of: {}", url))?;
+            // client.get(&*url).send().context(format!("Couldn't GET URL: {}", url))?.read_to_string(&mut body)
+            // .context(format!("Couldn't ready body of: {}", url))?;
 
-        let mut cache_file =
-            File::create(&path).context("Couldn't cache file")?;
-        println!("Caching {}", path.to_string_lossy());
-        cache_file
-            .write(tarball_res.as_slice())
-            .context("Couldn't write to cache file")?;
-    };
-
-    Ok(())
+            let mut cache_file =
+                File::create(&path).context("Couldn't cache file")?;
+            println!("Caching {}", path.to_string_lossy());
+            cache_file
+                .write(tarball_res.as_slice())
+                .context("Couldn't write to cache file")?;
+            Ok(())
+        },
+    }
 }
 
 fn install_deps(
