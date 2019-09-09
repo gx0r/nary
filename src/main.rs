@@ -138,7 +138,11 @@ fn get_cache_dir() -> Result<PathBuf, Error> {
     Ok(cache_dir)
 }
 
-fn cache(key: &str, version: &str, tarball_res: &mut Vec<u8>, tarball_url: &Url) -> Result<(), Error> {
+/**
+ * Cache the given package (key) at version from the given url, returning the (gzipped) tarball.
+ */
+fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>, Error> {
+    let mut tarball_res = Vec::<u8>::new();
     let mut path = get_cache_dir()?;
     path.push(&utf8_percent_encode(
         key,
@@ -153,10 +157,10 @@ fn cache(key: &str, version: &str, tarball_res: &mut Vec<u8>, tarball_url: &Url)
 
     match cache_file {
         Ok(mut cache_file) => {            
-            cache_file.read_to_end(tarball_res)
+            cache_file.read_to_end(&mut tarball_res)
                 .context("Couldn't cache file")?;
             println!("Read {} from cache", path.to_string_lossy());
-            Ok(())
+            Ok(tarball_res)
         },
         Err(_) => {
              let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
@@ -167,7 +171,7 @@ fn cache(key: &str, version: &str, tarball_res: &mut Vec<u8>, tarball_url: &Url)
                 // .header(AcceptEncoding(vec![qitem(Encoding::Gzip)]))
                 .send()
                 .with_context(|_| format!("Couldn't get tarball: {:?}", &tarball_url))?
-                .read_to_end(tarball_res)
+                .read_to_end(&mut tarball_res)
                 .with_context(|_| format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
 
             // client.get(&*url).send().context(format!("Couldn't GET URL: {}", url))?.read_to_string(&mut body)
@@ -179,7 +183,7 @@ fn cache(key: &str, version: &str, tarball_res: &mut Vec<u8>, tarball_url: &Url)
             cache_file
                 .write(tarball_res.as_slice())
                 .context("Couldn't write to cache file")?;
-            Ok(())
+            Ok(tarball_res)
         },
     }
 }
@@ -283,11 +287,7 @@ fn install_deps(
                     // let url = Url::parse(tarball_url);
                     // println!("Tarball URL: {:?}", &tarball_url);
 
-                    let mut tarball_res = Vec::new();
-                    cache(key, &version.0, &mut tarball_res, &tarball_url)?;
-
-                    // let mut ball = Vec::<u8>::new();
-                    // let _ = tarball_res.read_to_end(&mut ball).context(format!("Couldn't read to end of {}", tarball_url))?;
+                    let tarball_res = cache(key, &version.0, &tarball_url)?;
 
                     use flate2::read::GzDecoder;
                     let mut d = GzDecoder::new(tarball_res.as_slice());
@@ -295,13 +295,13 @@ fn install_deps(
                     let _ = d.read_to_end(&mut vec)
                         .with_context(|_| format!("Couldn't 2nd read to end of {}", tarball_url))?;
 
-                    let mut a = Archive::new(vec.as_slice());
+                    let mut archive = Archive::new(vec.as_slice());
 
                     let mut path = root_path.to_path_buf();
                     path.push("node_modules");
                     path.push(key);
 
-                    for (key, file) in a.entries() // https://docs.rs/tar/0.4.26/tar/struct.Entries.html
+                    for (key, file) in archive.entries() // https://docs.rs/tar/0.4.26/tar/struct.Entries.html
                         .with_context(|_| format!("{} didn't provide file entries", tarball_url))?
                         .enumerate()
                     {
