@@ -188,6 +188,16 @@ fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>, Error> 
     }
 }
 
+fn gunzip(tarball: Vec<u8>, tarball_url: &Url) -> Result<Vec<u8>, Error> {
+    use flate2::read::GzDecoder;
+    let mut vec = Vec::new();
+    let mut d = GzDecoder::new(tarball.as_slice());
+    let _ = d.read_to_end(&mut vec)
+        .with_context(|_| format!("Couldn't read to end of tarball: {}", tarball_url))?;
+
+    Ok(vec)
+}
+
 fn install_deps(
     root_path: &Path,
     deps: &serde_json::Map<String, serde_json::Value>,
@@ -287,15 +297,8 @@ fn install_deps(
                     // let url = Url::parse(tarball_url);
                     // println!("Tarball URL: {:?}", &tarball_url);
 
-                    let tarball_res = cache(key, &version.0, &tarball_url)?;
-
-                    use flate2::read::GzDecoder;
-                    let mut d = GzDecoder::new(tarball_res.as_slice());
-                    let mut vec = Vec::new();
-                    let _ = d.read_to_end(&mut vec)
-                        .with_context(|_| format!("Couldn't 2nd read to end of {}", tarball_url))?;
-
-                    let mut archive = Archive::new(vec.as_slice());
+                    let tarball = gunzip(cache(key, &version.0, &tarball_url)?, &tarball_url)?;
+                    let mut archive = Archive::new(tarball.as_slice());
 
                     let mut path = root_path.to_path_buf();
                     path.push("node_modules");
