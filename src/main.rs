@@ -33,7 +33,11 @@ use hyper::{
 use hyper_native_tls::NativeTlsClient;
 use semver_rs::{Version, Range};
 // use indicatif::ProgressBar;
-use percent_encoding::utf8_percent_encode;
+
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+// https://url.spec.whatwg.org/#path-percent-encode-set
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`')
+    .add(b'#').add(b'?').add(b'{').add(b'}');
 
 #[derive(Fail, Debug)]
 #[fail(display = "Needs a Home Directory")]
@@ -146,7 +150,7 @@ fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>, Error> 
     let mut path = get_cache_dir()?;
     path.push(&utf8_percent_encode(
         key,
-        percent_encoding::PATH_SEGMENT_ENCODE_SET,
+        PATH_SEGMENT_ENCODE_SET,
     ).to_string());
     let _ = fs::create_dir(&path);
     path.push(&version);
@@ -306,7 +310,7 @@ fn install_deps(
             let url = format!(
                 "{}{}",
                 "https://registry.npmjs.org/",
-                utf8_percent_encode(key, percent_encoding::PATH_SEGMENT_ENCODE_SET)
+                utf8_percent_encode(key, PATH_SEGMENT_ENCODE_SET)
             );
 
             // println!("{}", &url);
