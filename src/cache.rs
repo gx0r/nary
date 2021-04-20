@@ -1,4 +1,5 @@
-use failure::{Error, ResultExt};
+use anyhow::{Context, Result};
+
 use hyper::{net::HttpsConnector, Client, Url};
 use hyper_native_tls::NativeTlsClient;
 use std::{
@@ -9,10 +10,8 @@ use std::{
 };
 // use indicatif::ProgressBar;
 
-use crate::error::NeedHomeDir;
-
-pub fn get_cache_dir() -> Result<PathBuf, Error> {
-    let mut cache_dir = dirs::home_dir().ok_or(NeedHomeDir)?;
+pub fn get_cache_dir() -> Result<PathBuf> {
+    let mut cache_dir = dirs::home_dir().context("Couldn't find home dir")?;
 
     cache_dir.push(".nary_cache");
     create_dir_all(&cache_dir).context("Couldn't create cache")?;
@@ -37,7 +36,7 @@ pub const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 /**
  * Cache the given package (key) at version from the given url, returning the (gzipped) tarball.
  */
-pub fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>, Error> {
+pub fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>> {
     let mut tarball_res = Vec::<u8>::new();
     let mut path = get_cache_dir()?;
     path.push(&utf8_percent_encode(key, PATH_SEGMENT_ENCODE_SET).to_string());
@@ -65,9 +64,9 @@ pub fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>, Err
                 .get(tarball_url.clone())
                 // .header(AcceptEncoding(vec![qitem(Encoding::Gzip)]))
                 .send()
-                .with_context(|_| format!("Couldn't get tarball: {:?}", &tarball_url))?
+                .with_context(|| format!("Couldn't get tarball: {:?}", &tarball_url))?
                 .read_to_end(&mut tarball_res)
-                .with_context(|_| format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
+                .with_context(|| format!("Couldn't read to string tarball: {:?}", &tarball_url))?;
 
             // client.get(&*url).send().context(format!("Couldn't GET URL: {}", url))?.read_to_string(&mut body)
             // .context(format!("Couldn't ready body of: {}", url))?;

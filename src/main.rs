@@ -1,4 +1,5 @@
-use failure::{format_err, Error, ResultExt};
+use anyhow::{Context, Result, anyhow};
+
 use hyper::{net::HttpsConnector, Client, Url};
 use hyper_native_tls::NativeTlsClient;
 use semver_rs::{Range, Version};
@@ -18,7 +19,6 @@ use crate::pack::{gunzip, unpack_archive};
 
 mod cache;
 pub use crate::cache::{cache, get_cache_dir, PATH_SEGMENT_ENCODE_SET};
-mod error;
 
 use percent_encoding::utf8_percent_encode;
 
@@ -43,34 +43,15 @@ struct Opt {
     production: bool,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let opt = Opt::from_args();
     // println!("{:#?}", opt);
     let install_dev_dependencies = !opt.production;
 
-    if let Err(err) = install(&Path::new("."), !install_dev_dependencies) {
-        let stderr = &mut std::io::stderr();
-        let errmsg = "Error writing to stderr";
-
-        writeln!(stderr, "{}", err).expect(errmsg);
-
-        let mut fail = err.as_fail();
-        while let Some(cause) = fail.cause() {
-            writeln!(stderr, "{}", cause).expect(errmsg);
-
-            // Make `fail` the reference to the cause of the previous fail, making the
-            // loop "dig deeper" into the cause chain.
-            fail = cause;
-        }
-
-        // The backtrace is not always generated. `RUST_BACKTRACE=1`.
-        writeln!(stderr, "{}", err.backtrace()).expect(errmsg);
-
-        std::process::exit(1);
-    }
+    install(&Path::new("."), !install_dev_dependencies)
 }
 
-fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<(), Error> {
+fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<()> {
     let _ = fs::create_dir("node_modules");
     let installed_deps: HashMap<String, Version> = HashMap::new();
 
@@ -81,7 +62,7 @@ fn install_helper(
     root_path: &Path,
     install_dev_dependencies: bool,
     installed_deps: &HashMap<String, Version>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let mut package = root_path.to_path_buf();
     package.push("package.json");
 
@@ -124,7 +105,7 @@ fn install_deps(
     root_path: &Path,
     deps: &serde_json::Map<String, serde_json::Value>,
     installed_deps: &HashMap<String, Version>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
     let connector = HttpsConnector::new(ssl);
     let client = Client::with_connector(connector);
@@ -159,7 +140,7 @@ fn install_deps(
 
             let required_version = Range::new(version)
                 .parse()
-                .with_context(|_| format!("Version {} of {} didn't parse", version, key))?;
+                .with_context(|| format!("Version {} of {} didn't parse", version, key))?;
             match installed_deps.get(key) {
                 Some(installed_version) => {
                     if required_version.test(installed_version) {
@@ -185,23 +166,23 @@ fn install_deps(
             client
                 .get(&url)
                 .send()
-                .with_context(|_| format!("Couldn't GET URL: {}", url))?
+                .with_context(|| format!("Couldn't GET URL: {}", url))?
                 .read_to_string(&mut body)
-                .with_context(|_| format!("Couldn't ready body of: {}", url))?;
+                .with_context(|| format!("Couldn't ready body of: {}", url))?;
 
             // println!("{}", &body);
 
             let metadata: Value = serde_json::from_str(&body)
-                .with_context(|_| format!("Couldn't JSON parse metadata from {}", url))?;
+                .with_context(|| format!("Couldn't JSON parse metadata from {}", url))?;
             let versions = &metadata["versions"]
                 .as_object()
-                .ok_or(format_err!("Versions was not a JSON object. {}", url))?;
+                .ok_or(anyhow!("Versions was not a JSON object. {}", url))?;
 
             for version in versions.iter().rev() {
                 if required_version.test(
                     &Version::new(version.0.as_str())
                         .parse()
-                        .with_context(|_| format_err!("{} didn't parse", version.0))?,
+                        .with_context(|| format!("{} didn't parse", version.0))?,
                 ) {
                     // let version = &versions[version];
                     // println!("Version: \n{:?}", version);
@@ -215,7 +196,7 @@ fn install_deps(
                     let tarball_url = Url::parse(
                         &dist["tarball"]
                             .as_str()
-                            .ok_or(format_err!("tarball URL didn't convert to string"))?,
+                            .ok_or(anyhow!("tarball URL didn't convert to string"))?,
                     )
                     .context("Couldn't parse URL")?;
                     // let url = Url::parse(tarball_url);
@@ -232,7 +213,7 @@ fn install_deps(
 
                     let version_to_insert = Version::new(version.0.as_str())
                         .parse()
-                        .with_context(|_| format!("{} didn't parse", version.0))?;
+                        .with_context(|| format!("{} didn't parse", version.0))?;
                     installed_deps.insert(key.to_string(), version_to_insert);
 
                     next_paths.insert(path);
@@ -241,7 +222,7 @@ fn install_deps(
                 }
             }
         } else {
-            return Err(format_err!("A version of {} wasn't string parsable.", key));
+            return Err(anyhow!("A version of {} wasn't string parsable.", key));
         }
     }
 
