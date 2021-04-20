@@ -1,16 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 
+use petgraph;
+use petgraph::graphmap::DiGraphMap;
+
 use hyper::{net::HttpsConnector, Client, Url};
 use hyper_native_tls::NativeTlsClient;
 use semver_rs::{Range, Version};
 use serde_json::Value;
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    fs::File,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{cmp::Ordering, collections::{HashMap, HashSet}, fs, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
 use tar::Archive;
 // use indicatif::ProgressBar;
 
@@ -99,6 +96,45 @@ fn install_helper(
     }
 
     Ok(())
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Package<'a> {
+    name: &'a str,
+    // version: Version,
+}
+
+impl <'a> Ord for Package<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl <'a> PartialOrd for Package<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.name.cmp(&other.name))
+    }
+}
+
+fn calculate_depends<'a>(deps: &'a serde_json::Map<String, serde_json::Value>) -> DiGraphMap<Package<'a>, String> {
+    let mut graph: DiGraphMap<Package, String> = DiGraphMap::new();
+
+    let root = Package {
+        name: "this",
+    };
+
+    graph.add_node(root);
+
+    for (key, vers) in deps.iter() {
+        let package = Package{
+            name: key,
+            // version: vers,
+        };
+        graph.add_node(package);
+        graph.add_edge(root, package, vers.to_string());
+    }
+
+    graph
 }
 
 fn install_deps(
