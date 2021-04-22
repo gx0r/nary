@@ -268,3 +268,31 @@ fn install_deps(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use indoc::indoc;
+
+    use super::*;
+
+    #[test]
+    fn it_will_ejs() {
+        let input = indoc! {r###"
+            {
+                "private": true,
+                "name": "or",
+                "version": "1.0.0",
+                "description": "",
+                "main": "index.js",
+                "scripts": {
+                    "test": "echo \"Error: no test specified\" && exit 1"
+                },
+                "author": "",
+                "license": "ISC",
+                "dependencies": {
+                 "koa-ejs": "^4.1.0"
+                }
+            }
+        "###};
+    }
+}
