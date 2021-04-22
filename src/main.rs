@@ -52,39 +52,24 @@ fn install(root_path: &Path, install_dev_dependencies: bool) -> Result<()> {
     let _ = fs::create_dir("node_modules");
     let installed_deps: HashMap<String, Version> = HashMap::new();
 
-    return install_helper(root_path, false, &installed_deps);
+    let dependencies = path_to_dependencies(&root_path)?;
+    if let Some(dependencies) = dependencies {
+        return install_helper(root_path, &dependencies, install_dev_dependencies, &installed_deps);
+    };
+
+    Err(anyhow!("no dependencies"))
 }
 
 fn install_helper(
     root_path: &Path,
+    dependencies: &serde_json::Map<std::string::String, serde_json::Value>,
     install_dev_dependencies: bool,
     installed_deps: &HashMap<String, Version>,
 ) -> Result<()> {
-    let mut package = root_path.to_path_buf();
-    package.push("package.json");
 
-    let mut package_json = File::open(package).context(format!(
-        "Failed to open package.json of: {}",
-        root_path.to_string_lossy()
-    ))?;
+    let v = dependencies;
 
-    let mut contents = String::new();
-    package_json.read_to_string(&mut contents).context(format!(
-        "Failed to read package.json of: {}",
-        root_path.to_string_lossy()
-    ))?;
-
-    let v: Value = serde_json::from_str(&contents).context(format!(
-        "Failed to deserialize package.json of: {}",
-        root_path.to_string_lossy()
-    ))?;
-
-    if let Some(deps) = v["dependencies"].as_object() {
-        install_deps(root_path, deps, &installed_deps).context(format!(
-            "Failed to install a dependency of: {}",
-            root_path.to_string_lossy()
-        ))?;
-    }
+    install_deps(root_path, &dependencies, &installed_deps)?;
 
     if install_dev_dependencies {
         if let Some(dev_deps) = v["devDependencies"].as_object() {
@@ -262,22 +247,52 @@ fn install_deps(
         }
     }
 
-    for path in next_paths {
-        install_helper(&path, false, &installed_deps)?;
-    }
+    // for path in next_paths {
+    //     install_helper(&path, &dependencies, false, &installed_deps)?;
+    // }
 
     Ok(())
+}
+
+use std::io;
+
+fn path_to_dependencies<'a>(file: &Path)
+-> Result<Option<Box<serde_json::Map<std::string::String, serde_json::Value>>>> {
+    let mut package = file.to_path_buf();
+
+    if !package.ends_with("package.json") {
+        package.push("package.json");
+    }
+
+    let package_json = File::open(package)?;
+
+    json_to_dependencies(&package_json)
+}
+
+fn json_to_dependencies<'a>(mut reader: impl io::Read)
+-> Result<Option<Box<serde_json::Map<std::string::String, serde_json::Value>>>> {
+    let mut buffer = String::new();
+    reader.read_to_string(&mut buffer)?;
+
+    let root: Value = serde_json::from_str(&buffer)?;
+
+    match root["dependencies"].as_object() {
+        Some(dependencies) => Ok(Some(Box::new(dependencies.clone()))),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
 mod test {
     use indoc::indoc;
+    use std::io::BufReader;
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
     use super::*;
 
     #[test]
-    fn it_will_ejs() {
-        let input = indoc! {r###"
+    fn it_will_get_dependency_version() {
+        let package_json = indoc! {r###"
             {
                 "private": true,
                 "name": "or",
@@ -290,9 +305,18 @@ mod test {
                 "author": "",
                 "license": "ISC",
                 "dependencies": {
-                 "koa-ejs": "^4.1.0"
+                    "koa-ejs": "^4.1.0"
                 }
             }
         "###};
+
+        let cursor = Cursor::new(package_json);
+        let dependencies = json_to_dependencies(cursor);
+
+        let dependencies = dependencies.unwrap().unwrap();
+        let version = dependencies.get("koa-ejs").unwrap();
+
+        assert_eq!(version, "^4.1.0");
+
     }
 }
