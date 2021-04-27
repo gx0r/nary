@@ -12,10 +12,10 @@ use std::{
 use tar::Archive;
 
 mod pack;
-use self::pack::{gunzip, unpack_archive};
+use crate::pack::{gunzip, unpack_archive};
 
 mod cache;
-pub use self::cache::{cache, get_cache_dir, PATH_SEGMENT_ENCODE_SET};
+pub use crate::cache::{cache, get_cache_dir, PATH_SEGMENT_ENCODE_SET};
 
 pub mod deps;
 pub use deps::{calculate_depends, path_to_root_dependency, path_to_dependencies, Dependency};
@@ -53,11 +53,7 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
         .parse()
         .with_context(|| format!("Version {} of {} didn't parse", dep.version, dep.name))?;
 
-    let url = format!(
-        "{}{}",
-        "https://registry.npmjs.org/",
-        utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET)
-    );
+    let url = format!("{}{}", "https://registry.npmjs.org/", utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
 
     let mut body = String::new();
 
@@ -81,23 +77,14 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
                 .parse()
                 .with_context(|| format!("{} didn't parse", version.0))?,
         ) {
-            // let version = &versions[version];
-            // println!("Version: \n{:?}", version);
-
-            // PROGRESS_BAR.inc(1);
-
             let dist = &version.1["dist"];
-            // let dis = version.1;
 
-            // println!("Dist: {}", dist);
             let tarball_url = Url::parse(
                 &dist["tarball"]
                     .as_str()
                     .ok_or(anyhow!("tarball URL didn't convert to string"))?,
             )
             .context("Couldn't parse URL")?;
-            // let url = Url::parse(tarball_url);
-            // println!("Tarball URL: {:?}", &tarball_url);
 
             let tarball = gunzip(cache(&dep.name, &version.0, &tarball_url)?, &tarball_url)?;
             let mut archive = Archive::new(tarball.as_slice());

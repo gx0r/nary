@@ -7,60 +7,12 @@ use bidir_map::BidirMap;
 
 use indexmap::IndexMap;
 use serde_json::Value;
-use std::{cmp::Ordering, fs::File, io, path::Path};
+use std::{fs::File, io, path::Path};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dependency {
     pub name: String,
     pub version: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Package {
-    name: String,
-    version: String,
-}
-
-impl Package {
-    pub fn from_json(buffer: &str) -> Result<Self> {
-        let root: Value = serde_json::from_str(&buffer)?;
-        let name = root["name"].as_str().unwrap_or_default().to_string();
-        let version = root["version"].as_str().unwrap_or_default().to_string();
-
-        Ok(Package {
-            name: name.clone(),
-            version: version.clone(),
-        })
-    }
-}
-
-impl Ord for Package {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.name.cmp(&other.name)
-    }
-}
-
-impl PartialOrd for Package {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.name.cmp(&other.name))
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PackageInfo {
-    reference: usize,
-}
-
-impl Ord for PackageInfo {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.reference.cmp(&other.reference)
-    }
-}
-
-impl PartialOrd for PackageInfo {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.reference.cmp(&other.reference))
-    }
 }
 
 type DependencyId = i32;
