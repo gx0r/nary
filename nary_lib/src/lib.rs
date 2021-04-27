@@ -46,6 +46,7 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
         } else {
             Repository::clone(&dep.version, &path)?;
         }
+        return Ok(())
     }
 
     let required_version = Range::new(&dep.version)
