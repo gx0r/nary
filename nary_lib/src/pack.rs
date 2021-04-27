@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 use hyper::Url;
 use std::{fs::create_dir_all, io::Read, path::PathBuf};
