@@ -23,12 +23,9 @@ pub use deps::{calculate_depends, path_to_root_dependency, path_to_dependencies,
 use percent_encoding::utf8_percent_encode;
 
 pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
-    let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
-    let connector = HttpsConnector::new(ssl);
-    let client = Client::with_connector(connector);
-
-    let mut next_paths: HashSet<PathBuf> = HashSet::new();
-    // println!("Installing {:?}", dep);
+    let required_version = Range::new(&dep.version)
+        .parse()
+        .with_context(|| format!("Version {} of {} didn't parse", dep.version, dep.name))?;
 
     if dep.version.starts_with("git://") {
         use git2::Repository;
@@ -49,28 +46,13 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
         return Ok(())
     }
 
-    let required_version = Range::new(&dep.version)
-        .parse()
-        .with_context(|| format!("Version {} of {} didn't parse", dep.version, dep.name))?;
-
-    let url = format!("{}{}", "https://registry.npmjs.org/", utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
-
-    let mut body = String::new();
-
-    client
-        .get(&url)
-        .send()
-        .with_context(|| format!("Couldn't GET URL: {}", url))?
-        .read_to_string(&mut body)
-        .with_context(|| format!("Couldn't ready body of: {}", url))?;
-
-    let metadata: Value = serde_json::from_str(&body)
-        .with_context(|| format!("Couldn't JSON parse metadata from {}", url))?;
+    let metadata = fetch_package_metadata(&dep)?;
 
     let versions = &metadata["versions"]
         .as_object()
-        .ok_or(anyhow!("Versions was not a JSON object. {}", url))?;
+        .ok_or(anyhow!("Versions was not a JSON object"))?;
 
+    let mut next_paths: HashSet<PathBuf> = HashSet::new();
     for version in versions.iter().rev() {
         if required_version.test(
             &Version::new(version.0.as_str())
@@ -101,4 +83,26 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn fetch_package_metadata(dep: &Dependency) -> Result<serde_json::Value> {
+    let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
+    let connector = HttpsConnector::new(ssl);
+    let client = Client::with_connector(connector);
+
+    let url = format!("{}{}", "https://registry.npmjs.org/", utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
+
+    let mut body = String::new();
+
+    client
+        .get(&url)
+        .send()
+        .with_context(|| format!("Couldn't GET URL: {}", url))?
+        .read_to_string(&mut body)
+        .with_context(|| format!("Couldn't ready body of: {}", url))?;
+
+    let metadata: Value = serde_json::from_str(&body)
+        .with_context(|| format!("Couldn't JSON parse metadata from {}", url))?;
+
+    Ok(metadata)
 }

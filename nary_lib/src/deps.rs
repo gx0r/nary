@@ -9,6 +9,8 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::{fs::File, io, path::Path};
 
+use crate::fetch_package_metadata;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dependency {
     pub name: String,
@@ -75,7 +77,11 @@ pub fn calculate_depends_rec(
             graph.add_edge(dependency_node, curr_node, 0);
             let dependency = map.get_mut_by_second(&dependency_node).unwrap().clone();
 
-            calculate_depends_rec(&dependency, &remaining_deps, map, graph)?;
+            let metadata = fetch_package_metadata(&dependency)?;
+            let new_dependencies = &metadata["dependencies"];
+            let new_deps = serde_json_value_to_dependencies(&new_dependencies)?;
+
+            calculate_depends_rec(&dependency, &new_deps, map, graph)?;
         } else {
             let dependency_node = *map.get_by_first(&dependency).unwrap();
             graph.add_edge(dependency_node, curr_node, 0);
@@ -118,14 +124,21 @@ pub fn json_to_dependencies(mut reader: impl io::Read) -> Result<Vec<Dependency>
     reader.read_to_string(&mut buffer)?;
 
     let root: Value = serde_json::from_str(&buffer)?;
+    serde_json_value_to_dependencies(&root["dependencies"])
+}
+
+pub fn serde_json_value_to_dependencies(root: &serde_json::Value) -> Result<Vec<Dependency>> {
     let mut vec = Vec::new();
 
-    if let Some(dependencies) = root["dependencies"].as_object() {
+    if let Some(dependencies) = root.as_object() {
         for dependency in dependencies.iter() {
-            vec.push(Dependency {
-                name: dependency.0.to_string(),
-                version: dependency.1.as_str().unwrap().to_string(),
-            });
+            println!("{} {} ", dependency.0, dependency.1);
+            if !dependency.0.starts_with("_") {
+                vec.push(Dependency {
+                    name: dependency.0.to_string(),
+                    version: dependency.1.as_str().unwrap().to_string(),
+                });
+            }
         }
     };
 
