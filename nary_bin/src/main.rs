@@ -6,6 +6,7 @@ use std::{
 };
 
 use structopt::StructOpt;
+use indicatif::ProgressIterator;
 
 use nary_lib::{calculate_depends, path_to_dependencies, path_to_root_dependency, install_dep};
 
@@ -36,7 +37,7 @@ fn install(root_path: &Path, _install_dev_dependencies: bool) -> Result<()> {
     let root = path_to_root_dependency(&root_path)?;
     let depends = calculate_depends(&root, &dependencies)?;
 
-    for dep in depends {
+    for dep in depends.iter().progress() {
         install_dep(&Path::new(&"./node_modules".to_string()), &dep.0)?;
     }
 
