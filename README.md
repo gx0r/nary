@@ -1,5 +1,5 @@
 # nary
-Nary stands for "Nary ain't Rust Yarn"
+Nary stands for "Nary ain't Rusty Yarn"
 
 Toy npm-like installer to see what writing one in Rust could be like.
 
