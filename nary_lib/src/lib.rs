@@ -22,6 +22,9 @@ pub use deps::{calculate_depends, path_to_root_dependency, path_to_dependencies,
 
 use percent_encoding::utf8_percent_encode;
 
+static REGISTRY: &'static str = "https://registry.npmjs.org";
+// static REGISTRY: &'static str = "http://127.0.0.1:5080";
+
 pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
     let required_version = Range::new(&dep.version)
         .parse()
@@ -46,7 +49,7 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
         return Ok(())
     }
 
-    let metadata = fetch_package_metadata(&dep)?;
+    let metadata = fetch_package_root_metadata(&dep)?;
 
     let versions = &metadata["versions"]
         .as_object()
@@ -85,12 +88,14 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
     Ok(())
 }
 
-pub fn fetch_package_metadata(dep: &Dependency) -> Result<serde_json::Value> {
+/// Metadata for a specific version of a package
+pub fn fetch_package_version_metadata(dep: &Dependency, version: &String) -> Result<serde_json::Value> {
     let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
     let connector = HttpsConnector::new(ssl);
     let client = Client::with_connector(connector);
 
-    let url = format!("{}{}", "https://registry.npmjs.org/", utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
+    let url = format!("{}/{}/{}", REGISTRY,
+        utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET), utf8_percent_encode(&version, PATH_SEGMENT_ENCODE_SET));
 
     let mut body = String::new();
 
@@ -105,4 +110,58 @@ pub fn fetch_package_metadata(dep: &Dependency) -> Result<serde_json::Value> {
         .with_context(|| format!("Couldn't JSON parse metadata from {}", url))?;
 
     Ok(metadata)
+}
+
+/// Metadata for all versions
+pub fn fetch_package_root_metadata(dep: &Dependency) -> Result<serde_json::Value> {
+    let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
+    let connector = HttpsConnector::new(ssl);
+    let client = Client::with_connector(connector);
+
+    let url = format!("{}/{}", REGISTRY, utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
+
+    let mut body = String::new();
+
+    client
+        .get(&url)
+        .send()
+        .with_context(|| format!("Couldn't GET URL: {}", url))?
+        .read_to_string(&mut body)
+        .with_context(|| format!("Couldn't ready body of: {}", url))?;
+
+    let body: Value = serde_json::from_str(&body)
+        .with_context(|| format!("Couldn't JSON parse metadata from {}", url))?;
+
+    Ok(body)
+}
+
+pub fn fetch_matching_version_metadata<'a>(dep: &'a Dependency, root_metadata: &'a serde_json::Value) -> Result<(&'a String, &'a Value)> {
+    let required_version = Range::new(&dep.version)
+        .parse()
+        .with_context(|| format!("Version {} of {} didn't parse", dep.version, dep.name))?;
+
+    let versions = &root_metadata["versions"]
+        .as_object()
+        .ok_or(anyhow!("Versions was not a JSON object"))?;
+
+    for version in versions.iter().rev() {
+        if required_version.test(
+            &Version::new(version.0.as_str())
+                .parse()
+                .with_context(|| format!("{} didn't parse", version.0))?,
+        ) {
+            // let dist = &version.1["dist"];
+
+            // let tarball_url = Url::parse(
+            //     &dist["tarball"]
+            //         .as_str()
+            //         .ok_or(anyhow!("tarball URL didn't convert to string"))?,
+            // )
+            // .context("Couldn't parse URL")?;
+
+            return Ok(version);
+        }
+    }
+
+    Err(anyhow!("ho matching version"))
 }

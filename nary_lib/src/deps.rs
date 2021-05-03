@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::{fs::File, io, path::Path};
 
-use crate::fetch_package_metadata;
+use crate::{fetch_package_root_metadata, fetch_matching_version_metadata, fetch_package_version_metadata};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dependency {
@@ -69,17 +69,28 @@ pub fn calculate_depends_rec(
         let index = remaining_deps.len() - 1;
         let dependency = remaining_deps.remove(index);
 
+        println!("{} {}", dependency.name, dependency.version);
+
         if !map.contains_first_key(&dependency) {
             let dependency_node = map.len() as i32;
             graph.add_node(dependency_node);
-            map.insert(dependency.clone(), dependency_node);
+            map.insert(dependency, dependency_node);
 
             graph.add_edge(dependency_node, curr_node, 0);
             let dependency = map.get_mut_by_second(&dependency_node).unwrap().clone();
 
-            let metadata = fetch_package_metadata(&dependency)?;
-            let new_dependencies = &metadata["dependencies"];
-            let new_deps = serde_json_value_to_dependencies(&new_dependencies)?;
+            let root_metadata = fetch_package_root_metadata(&dependency)?;
+            // println!("{}", root_metadata);
+
+            // let versions = &metadata["versions"];
+            let matching_version = fetch_matching_version_metadata(&dependency, &root_metadata)?;
+            println!("Found version: {}", matching_version.0);
+
+            let package_metadata = fetch_package_version_metadata(&dependency, &matching_version.0)?;
+            // pick the version, then install it to get its ["dependencies"]
+
+            // println!("{}", package_metadata);
+            let new_deps = serde_json_value_to_dependencies(&package_metadata["dependencies"])?;
 
             calculate_depends_rec(&dependency, &new_deps, map, graph)?;
         } else {
