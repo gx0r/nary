@@ -6,7 +6,7 @@ use std::{
 };
 
 use structopt::StructOpt;
-use indicatif::ProgressIterator;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use nary_lib::{calculate_depends, path_to_dependencies, path_to_root_dependency, install_dep};
 
@@ -25,7 +25,6 @@ struct Opt {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
-    // println!("{:#?}", opt);
     let install_dev_dependencies = !opt.production;
 
     install(&Path::new("."), !install_dev_dependencies)
@@ -37,9 +36,22 @@ fn install(root_path: &Path, _install_dev_dependencies: bool) -> Result<()> {
     let root = path_to_root_dependency(&root_path)?;
     let depends = calculate_depends(&root, &dependencies)?;
 
-    for dep in depends.iter().progress() {
+    let pb = ProgressBar::new(depends.iter().len() as u64);
+
+    pb.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}"));
+
+
+    for dep in depends.iter() {
+        pb.inc(1);
+        {
+            let name = dep.0.name.to_string();
+            let ver = dep.0.version.to_string();
+            pb.set_message(format!("{}@{}", name, ver));
+        }
         install_dep(&Path::new(&"./node_modules".to_string()), &dep.0)?;
     }
+    pb.finish_and_clear();
 
     Ok(())
 }

@@ -36,8 +36,6 @@ pub fn calculate_depends(
 
     let mut ordered_dependencies: IndexMap<Dependency, ()> = IndexMap::new();
 
-    println!("Deps: {:?}", ordered_dependencies);
-
     for i in dependency_ids {
         let second = map.get_by_second(&i).unwrap();
 

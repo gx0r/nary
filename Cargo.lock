@@ -367,6 +367,8 @@ dependencies = [
  "lazy_static",
  "number_prefix",
  "regex",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

@@ -28,7 +28,7 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
     let client = Client::with_connector(connector);
 
     let mut next_paths: HashSet<PathBuf> = HashSet::new();
-    println!("Installing {:?}", dep);
+    // println!("Installing {:?}", dep);
 
     if dep.version.starts_with("git://") {
         use git2::Repository;
