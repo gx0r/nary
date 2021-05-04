@@ -44,11 +44,11 @@ fn install(root_path: &Path, _install_dev_dependencies: bool) -> Result<()> {
 
     for dep in depends.iter() {
         pb.inc(1);
-        {
-            let name = dep.0.name.to_string();
-            let ver = dep.0.version.to_string();
-            pb.set_message(format!("{}@{}", name, ver));
-        }
+
+        let name = dep.0.name.to_string();
+        let ver = dep.0.version.to_string();
+        pb.set_message(format!("{}@{}", name, ver));
+
         install_dep(&Path::new(&"./node_modules".to_string()), &dep.0)?;
     }
     pb.finish_and_clear();

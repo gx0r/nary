@@ -22,6 +22,7 @@ thiserror = "1.0"
 petgraph = "0.5.1"
 bidir-map = "1.0.0"
 indexmap = "1.6.2"
+static_init = "1.0.1"
 
 [dev-dependencies]
 indoc = "1.0.3"

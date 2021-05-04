@@ -21,6 +21,10 @@ pub mod deps;
 pub use deps::{calculate_depends, path_to_root_dependency, path_to_dependencies, Dependency};
 
 use percent_encoding::utf8_percent_encode;
+use static_init::{dynamic};
+
+#[dynamic]
+static CLIENT_CONNECTOR: Client = Client::with_connector(HttpsConnector::new(NativeTlsClient::new().unwrap()));
 
 static REGISTRY: &'static str = "https://registry.npmjs.org";
 // static REGISTRY: &'static str = "http://127.0.0.1:5080";
@@ -114,15 +118,11 @@ pub fn fetch_package_version_metadata(dep: &Dependency, version: &String) -> Res
 
 /// Metadata for all versions
 pub fn fetch_package_root_metadata(dep: &Dependency) -> Result<serde_json::Value> {
-    let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
-    let connector = HttpsConnector::new(ssl);
-    let client = Client::with_connector(connector);
-
     let url = format!("{}/{}", REGISTRY, utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
 
     let mut body = String::new();
 
-    client
+    CLIENT_CONNECTOR
         .get(&url)
         .send()
         .with_context(|| format!("Couldn't GET URL: {}", url))?
