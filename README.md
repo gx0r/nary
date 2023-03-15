@@ -11,8 +11,9 @@ Some ideas are:
 
 ## Example
 
+git clone first
+
 ```
-git clone https://github.com/ggcode1/nary.git
 cd nary/nary_bin
 cargo install --path . --force
 cd ../examples/boiler
