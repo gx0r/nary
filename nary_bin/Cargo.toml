@@ -11,7 +11,7 @@ anyhow = "1.0.40"
 structopt = "^0.3.3"
 serde_json = "^1.0.41"
 serde_derive = "^1.0.101"
-dirs = "^2.0.2"
+dirs = "5.0.0"
 indicatif = { version = "^0.16.0", features = ["improved_unicode"] }
 
 [[bin]]
