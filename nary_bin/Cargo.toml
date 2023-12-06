@@ -7,12 +7,12 @@ publish = false
 
 [dependencies]
 nary_lib = { path = "../nary_lib" }
-anyhow = "1.0.40"
-structopt = "^0.3.3"
-serde_json = "^1.0.41"
-serde_derive = "^1.0.101"
-dirs = "5.0.0"
-indicatif = { version = "^0.16.0", features = ["improved_unicode"] }
+anyhow = "1.0.75"
+structopt = "0.3.26"
+serde_json = "1.0.108"
+serde_derive = "1.0.193"
+dirs = "5.0.1"
+indicatif = { version = "0.17.7", features = ["improved_unicode"] }
 
 [[bin]]
 name = "nary"

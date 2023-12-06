@@ -1,6 +1,4 @@
 [workspace]
+resolver = "2"
 
-members = [
-    "nary_bin",
-    "nary_lib",
-]
+members = ["nary_bin", "nary_lib"]

@@ -1,14 +1,12 @@
-use anyhow::{Result};
-use std::{fs};
+use anyhow::Result;
+use std::fs;
 
-use std::{
-    path::{Path},
-};
+use std::path::Path;
 
-use structopt::StructOpt;
 use indicatif::{ProgressBar, ProgressStyle};
+use structopt::StructOpt;
 
-use nary_lib::{calculate_depends, path_to_dependencies, path_to_root_dependency, install_dep};
+use nary_lib::{calculate_depends, install_dep, path_to_dependencies, path_to_root_dependency};
 
 /// nary
 #[derive(StructOpt, Debug)]
@@ -38,9 +36,11 @@ fn install(root_path: &Path, _install_dev_dependencies: bool) -> Result<()> {
 
     let pb = ProgressBar::new(depends.iter().len() as u64);
 
-    pb.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}"));
-
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .unwrap(),
+    );
 
     for dep in depends.iter() {
         pb.inc(1);
