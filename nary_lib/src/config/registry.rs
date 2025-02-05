@@ -92,10 +92,10 @@ impl RegistryConfig {
 
     /// Get authentication headers for a URL
     pub fn auth_headers(&self, url: &str) -> Option<HeaderMap> {
-        let host = extract_host(url)?;
+        let url_key = extract_registry_key(url)?;
 
-        // Check for bearer token first
-        if let Some(token) = self.config.auth_tokens.get(host) {
+        // Check for bearer token first (try longest prefix match)
+        if let Some(token) = find_longest_match(&self.config.auth_tokens, &url_key) {
             let mut headers = HeaderMap::new();
             let auth_value = format!("Bearer {}", token);
             if let Ok(value) = HeaderValue::from_str(&auth_value) {
@@ -105,7 +105,7 @@ impl RegistryConfig {
         }
 
         // Check for legacy basic auth
-        if let Some(auth) = self.config.legacy_auth.get(host) {
+        if let Some(auth) = find_longest_match(&self.config.legacy_auth, &url_key) {
             let mut headers = HeaderMap::new();
             let auth_value = format!("Basic {}", auth);
             if let Ok(value) = HeaderValue::from_str(&auth_value) {
@@ -130,21 +130,33 @@ impl RegistryConfig {
 
     /// Check if authentication is configured for a registry
     pub fn has_auth_for(&self, url: &str) -> bool {
-        if let Some(host) = extract_host(url) {
-            self.config.auth_tokens.contains_key(host) || self.config.legacy_auth.contains_key(host)
+        if let Some(url_key) = extract_registry_key(url) {
+            find_longest_match(&self.config.auth_tokens, &url_key).is_some()
+                || find_longest_match(&self.config.legacy_auth, &url_key).is_some()
         } else {
             false
         }
     }
 }
 
-/// Extract the host from a URL for auth lookup
-/// "https://npm.mycompany.com/package" -> "npm.mycompany.com"
-fn extract_host(url: &str) -> Option<&str> {
+/// Extract registry key from URL for auth lookup (host + path prefix)
+/// "https://npm.mycompany.com/api/npm/@scope/pkg" -> "npm.mycompany.com/api/npm/@scope/pkg"
+fn extract_registry_key(url: &str) -> Option<String> {
     let url = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    url.split('/').next()
+    Some(url.to_string())
+}
+
+/// Find the longest matching key that is a prefix of the URL
+fn find_longest_match<'a>(
+    map: &'a std::collections::HashMap<String, String>,
+    url_key: &str,
+) -> Option<&'a str> {
+    map.iter()
+        .filter(|(key, _)| url_key.starts_with(key.as_str()))
+        .max_by_key(|(key, _)| key.len())
+        .map(|(_, value)| value.as_str())
 }
 
 #[cfg(test)]
@@ -189,22 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_host() {
-        assert_eq!(
-            extract_host("https://npm.mycompany.com/pkg"),
-            Some("npm.mycompany.com")
-        );
-        assert_eq!(
-            extract_host("https://registry.npmjs.org/"),
-            Some("registry.npmjs.org")
-        );
-        assert_eq!(
-            extract_host("http://localhost:4873/pkg"),
-            Some("localhost:4873")
-        );
-    }
-
-    #[test]
     fn test_auth_headers() {
         let mut npmrc = NpmrcConfig::default();
         npmrc
@@ -222,5 +218,25 @@ mod tests {
         // No auth for public registry
         let public_headers = config.auth_headers("https://registry.npmjs.org/package");
         assert!(public_headers.is_none());
+    }
+
+    #[test]
+    fn test_auth_headers_with_path() {
+        let mut npmrc = NpmrcConfig::default();
+        // Auth token with path prefix (e.g., //registry.example.com/npm/:_authToken=xxx)
+        npmrc.auth_tokens.insert(
+            "registry.example.com/npm".to_string(),
+            "pathtoken".to_string(),
+        );
+
+        let config = RegistryConfig::with_config(npmrc, DEFAULT_REGISTRY.to_string());
+
+        // Should match URLs under that path
+        let headers = config.auth_headers("https://registry.example.com/npm/@scope/pkg");
+        assert!(headers.is_some());
+
+        // Should not match URLs outside that path
+        let other_headers = config.auth_headers("https://registry.example.com/other/pkg");
+        assert!(other_headers.is_none());
     }
 }

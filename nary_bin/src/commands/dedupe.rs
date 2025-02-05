@@ -39,12 +39,13 @@ pub async fn run_dedupe(args: &DedupeArgs) -> Result<()> {
     } else {
         eprintln!("Analyzing dependency tree...");
     }
+    let registry_config = RegistryConfig::load();
     let new_deps = calculate_depends_with_options(
         &client,
         &root,
         &dependencies,
         |_, _| {},
-        &RegistryConfig::default(),
+        &registry_config,
         &options,
     )
     .await?;

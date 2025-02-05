@@ -85,8 +85,8 @@ impl NpmrcConfig {
     }
 
     /// Load and merge .npmrc files from standard locations
-    /// Order: global (~/.npmrc) -> project (./.npmrc)
-    /// Later files override earlier ones
+    /// Order: global (~/.npmrc) -> project (walking up from cwd)
+    /// Later/closer files override earlier ones
     pub fn load() -> Self {
         let mut config = Self::default();
 
@@ -97,9 +97,27 @@ impl NpmrcConfig {
             }
         }
 
-        // Project: ./.npmrc
-        if let Some(project) = Self::load_from_file(Path::new(".npmrc")) {
-            config.merge(project);
+        // Project: walk up from current directory looking for .npmrc files
+        // Collect them in reverse order (root first) so closer ones override
+        if let Ok(cwd) = std::env::current_dir() {
+            let mut npmrc_files = Vec::new();
+            let mut dir = cwd.as_path();
+            loop {
+                let npmrc_path = dir.join(".npmrc");
+                if npmrc_path.exists() {
+                    npmrc_files.push(npmrc_path);
+                }
+                match dir.parent() {
+                    Some(parent) => dir = parent,
+                    None => break,
+                }
+            }
+            // Apply in reverse order (root first, cwd last)
+            for npmrc_path in npmrc_files.into_iter().rev() {
+                if let Some(project) = Self::load_from_file(&npmrc_path) {
+                    config.merge(project);
+                }
+            }
         }
 
         config

@@ -26,6 +26,13 @@ pub enum Error {
         backtrace: snafu::Backtrace,
     },
 
+    #[snafu(display("Registry returned {status} for {url}: {body}"))]
+    HttpStatus {
+        url: String,
+        status: u16,
+        body: String,
+    },
+
     // === Parse Errors ===
     #[snafu(display("Failed to parse JSON from {source_desc}"))]
     JsonParse {
@@ -46,10 +53,11 @@ pub enum Error {
     #[snafu(display("Invalid semver version '{version}'"))]
     SemverVersionParse { version: String },
 
-    #[snafu(display("Missing field '{field}' for {package}"))]
+    #[snafu(display("Missing field '{field}' for {package}{}", hint.as_ref().map(|h| format!(" ({})", h)).unwrap_or_default()))]
     MissingField {
         package: String,
         field: &'static str,
+        hint: Option<String>,
     },
 
     // === IO Errors ===

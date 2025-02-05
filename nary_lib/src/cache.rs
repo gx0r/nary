@@ -65,6 +65,8 @@ pub fn dir_size(path: &Path) -> u64 {
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 
 /// https://url.spec.whatwg.org/#path-percent-encode-set
+/// Note: We also encode '/' for scoped package names (@scope/pkg -> @scope%2Fpkg)
+/// to match npm's behavior with registries like Google Artifact Registry
 pub const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -74,7 +76,8 @@ pub const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'#')
     .add(b'?')
     .add(b'{')
-    .add(b'}');
+    .add(b'}')
+    .add(b'/');
 
 /// Cache the given package tarball, returning the (gzipped) bytes.
 /// Uses local cache if available, otherwise downloads from tarball_url.

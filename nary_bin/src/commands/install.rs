@@ -12,8 +12,8 @@ use nary_lib::{
     build_package_lock, calculate_depends_with_options, create_client, deps_from_lockfile,
     get_audit_summary, install_dep_with_tarball_url, path_to_dependencies, path_to_overrides,
     path_to_root_dependency, read_package_lock, scan_node_modules, write_package_lock,
-    LifecycleRunner, MaturityConfig, NpmrcConfig, ResolveOptions, ScriptAudit, WorkspaceConfig,
-    DEFAULT_MATURITY_MINUTES,
+    LifecycleRunner, MaturityConfig, NpmrcConfig, RegistryConfig, ResolveOptions, ScriptAudit,
+    WorkspaceConfig, DEFAULT_MATURITY_MINUTES,
 };
 
 use crate::error::Result;
@@ -126,6 +126,7 @@ async fn install_workspace(workspace: &WorkspaceConfig, opts: &InstallOptions) -
     // Safe to ignore: dir may already exist
     let _ = fs::create_dir(root_path.join("node_modules"));
     let client = create_client()?;
+    let registry_config = RegistryConfig::load();
 
     // Collect all dependencies from all workspace members
     let mut all_deps: Vec<Dependency> = Vec::new();
@@ -213,7 +214,7 @@ async fn install_workspace(workspace: &WorkspaceConfig, opts: &InstallOptions) -
                 |name, version| {
                     spinner.set_message(format!("Resolving {}@{}", name, version));
                 },
-                &Default::default(),
+                &registry_config,
                 &resolve_options,
             )
             .await?;
@@ -264,7 +265,7 @@ async fn install_workspace(workspace: &WorkspaceConfig, opts: &InstallOptions) -
             |name, version| {
                 spinner.set_message(format!("Resolving {}@{}", name, version));
             },
-            &Default::default(),
+            &registry_config,
             &resolve_options,
         )
         .await?;
@@ -473,6 +474,7 @@ async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
 
     let _ = fs::create_dir("node_modules");
     let client = create_client()?;
+    let registry_config = RegistryConfig::load();
 
     // Check for existing package-lock.json
     let lockfile_path = root_path.join("package-lock.json");
@@ -533,7 +535,7 @@ async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
                 |name, version| {
                     spinner.set_message(format!("Resolving {}@{}", name, version));
                 },
-                &Default::default(),
+                &registry_config,
                 &resolve_options,
             )
             .await?;
@@ -585,7 +587,7 @@ async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
             |name, version| {
                 spinner.set_message(format!("Resolving {}@{}", name, version));
             },
-            &Default::default(),
+            &registry_config,
             &resolve_options,
         )
         .await?;

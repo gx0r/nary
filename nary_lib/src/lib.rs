@@ -80,9 +80,46 @@ pub use why::{
 
 use crate::error::{
     DirCreateSnafu, GitCheckoutSnafu, GitCloneSnafu, HttpClientBuildSnafu, HttpRequestSnafu,
-    HttpResponseSnafu, JsonParseSnafu, MissingFieldSnafu, NoMatchingVersionSnafu,
+    HttpResponseSnafu, HttpStatusSnafu, JsonParseSnafu, MissingFieldSnafu, NoMatchingVersionSnafu,
     NoMatureVersionSnafu, SemverRangeParseSnafu, SymlinkSnafu,
 };
+
+/// Generate a hint about what the response contained (for error messages)
+fn json_keys_hint(value: &Value) -> Option<String> {
+    if let Some(obj) = value.as_object() {
+        // If there's an "error" key, show its value directly
+        if let Some(err) = obj.get("error") {
+            let err_str = if let Some(s) = err.as_str() {
+                s.to_string()
+            } else {
+                err.to_string()
+            };
+            return Some(format!("registry error: {}", err_str));
+        }
+        // Otherwise show what keys are present
+        let keys: Vec<_> = obj.keys().take(5).map(|k| k.as_str()).collect();
+        if keys.is_empty() {
+            Some("response was empty object".to_string())
+        } else if obj.len() > 5 {
+            Some(format!(
+                "got keys: {}, ... ({} total)",
+                keys.join(", "),
+                obj.len()
+            ))
+        } else {
+            Some(format!("got keys: {}", keys.join(", ")))
+        }
+    } else if value.is_null() {
+        Some("response was null".to_string())
+    } else if let Some(s) = value.as_str() {
+        Some(format!(
+            "response was string: {:?}",
+            s.chars().take(50).collect::<String>()
+        ))
+    } else {
+        None
+    }
+}
 
 /// Create a shared HTTP client with connection pooling
 pub fn create_client() -> Result<Client> {
@@ -400,6 +437,7 @@ pub async fn install_dep_with_tarball_url(
                     MissingFieldSnafu {
                         package: dep.name.clone(),
                         field: "versions",
+                        hint: json_keys_hint(&metadata),
                     }
                     .build()
                 })?;
@@ -407,6 +445,7 @@ pub async fn install_dep_with_tarball_url(
                     MissingFieldSnafu {
                         package: dep.name.clone(),
                         field: "resolved version",
+                        hint: None,
                     }
                     .build()
                 })?;
@@ -416,6 +455,7 @@ pub async fn install_dep_with_tarball_url(
                         MissingFieldSnafu {
                             package: dep.name.clone(),
                             field: "dist.tarball",
+                            hint: None,
                         }
                         .build()
                     })?
@@ -455,9 +495,21 @@ async fn fetch_json(request: reqwest::RequestBuilder, url: &str) -> Result<Value
     let response = request.send().await.context(HttpRequestSnafu {
         url: url.to_string(),
     })?;
+    let status = response.status();
     let body = response.text().await.context(HttpResponseSnafu {
         url: url.to_string(),
     })?;
+
+    // Check for non-success status codes
+    if !status.is_success() {
+        return Err(HttpStatusSnafu {
+            url: url.to_string(),
+            status: status.as_u16(),
+            body: body.chars().take(200).collect::<String>(),
+        }
+        .build());
+    }
+
     serde_json::from_str(&body).context(JsonParseSnafu {
         source_desc: url.to_string(),
     })
@@ -622,6 +674,7 @@ pub fn fetch_matching_version_metadata<'a>(
         MissingFieldSnafu {
             package: dep.name.clone(),
             field: "versions",
+            hint: json_keys_hint(root_metadata),
         }
         .build()
     })?;
@@ -684,6 +737,7 @@ pub fn fetch_matching_version_metadata_with_maturity<'a>(
         MissingFieldSnafu {
             package: dep.name.clone(),
             field: "versions",
+            hint: json_keys_hint(root_metadata),
         }
         .build()
     })?;
