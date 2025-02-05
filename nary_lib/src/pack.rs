@@ -98,6 +98,24 @@ pub fn unpack_archive(
                 url: tarball_url.to_string(),
                 index,
             })?;
+
+            // Normalize directory permissions: ensure execute bits where read bits exist.
+            // Some packages (e.g. char-regex) have tarballs with directories missing +x, which
+            // prevents traversal and makes rm -rf fail. This mirrors npm's node-tar behavior.
+            #[cfg(unix)]
+            if entry_type.is_dir() {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&file_path) {
+                    let mode = meta.permissions().mode();
+                    let normalized = mode | ((mode >> 2) & 0o111);
+                    if normalized != mode {
+                        let _ = std::fs::set_permissions(
+                            &file_path,
+                            std::fs::Permissions::from_mode(normalized),
+                        );
+                    }
+                }
+            }
         } else {
             eprintln!("Tarball {} had a bad entry {}", tarball_url, index);
         }
@@ -112,7 +130,7 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Write;
-    use tar::Builder;
+    use tar::{Builder, Header};
     use tempfile::TempDir;
 
     fn gzip(data: &[u8]) -> Vec<u8> {
@@ -483,5 +501,60 @@ mod tests {
 
         let content = std::fs::read_to_string(dest.join("lib.js")).unwrap();
         assert_eq!(content, "export const lib = true;");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unpack_normalizes_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Create a tarball with a directory that has mode 0644 (no execute bit)
+        // This reproduces issues like char-regex where rm -rf fails
+        let mut builder = Builder::new(Vec::new());
+
+        // Add directory entry with restrictive permissions (no execute)
+        let mut dir_header = Header::new_gnu();
+        dir_header.set_path("package/subdir").unwrap();
+        dir_header.set_size(0);
+        dir_header.set_entry_type(tar::EntryType::Directory);
+        dir_header.set_mode(0o644); // rw-r--r-- (missing +x)
+        dir_header.set_mtime(0);
+        dir_header.set_cksum();
+        builder.append(&dir_header, &[] as &[u8]).unwrap();
+
+        // Add a file in that directory
+        let mut file_header = Header::new_gnu();
+        file_header.set_path("package/subdir/file.txt").unwrap();
+        file_header.set_size(5);
+        file_header.set_entry_type(tar::EntryType::Regular);
+        file_header.set_mode(0o644);
+        file_header.set_mtime(0);
+        file_header.set_cksum();
+        builder.append(&file_header, &b"hello"[..]).unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let temp = TempDir::new().unwrap();
+        let dest = temp.path().to_path_buf();
+
+        let mut archive = Archive::new(tar_data.as_slice());
+        unpack_archive(&mut archive, &dest, "test://url").unwrap();
+
+        // Verify the directory has execute permission (can be traversed)
+        let dir_meta = std::fs::metadata(dest.join("subdir")).unwrap();
+        let mode = dir_meta.permissions().mode();
+
+        // Should have at least user execute bit since we had user read
+        assert!(
+            mode & 0o100 != 0,
+            "directory should have user execute bit, got mode {:o}",
+            mode
+        );
+
+        // Verify the file is accessible (proves directory is traversable)
+        let content = std::fs::read_to_string(dest.join("subdir/file.txt")).unwrap();
+        assert_eq!(content, "hello");
+
+        // Verify rm -rf would work (the original symptom)
+        std::fs::remove_dir_all(dest.join("subdir")).unwrap();
     }
 }
