@@ -5,7 +5,7 @@ use hyper_native_tls::NativeTlsClient;
 use semver_rs::{Range, Version};
 use serde_json::Value;
 use std::{
-    collections::{HashSet},
+    collections::HashSet,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -18,13 +18,14 @@ mod cache;
 pub use crate::cache::{cache, get_cache_dir, PATH_SEGMENT_ENCODE_SET};
 
 pub mod deps;
-pub use deps::{calculate_depends, path_to_root_dependency, path_to_dependencies, Dependency};
+pub use deps::{calculate_depends, path_to_dependencies, path_to_root_dependency, Dependency};
 
 use percent_encoding::utf8_percent_encode;
-use static_init::{dynamic};
+use static_init::dynamic;
 
 #[dynamic]
-static CLIENT_CONNECTOR: Client = Client::with_connector(HttpsConnector::new(NativeTlsClient::new().unwrap()));
+static CLIENT_CONNECTOR: Client =
+    Client::with_connector(HttpsConnector::new(NativeTlsClient::new().unwrap()));
 
 static REGISTRY: &'static str = "https://registry.npmjs.org";
 // static REGISTRY: &'static str = "http://127.0.0.1:5080";
@@ -36,13 +37,13 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
 
     if dep.version.starts_with("git://") {
         use git2::Repository;
-        let mut path = path.clone().to_path_buf();
+        let mut path = path.to_path_buf();
         path.push(dep.name.clone());
 
         if let Some(x) = dep.version.rfind('#') {
             let (repo, hash) = dep.version.split_at(x);
             let repo_cloned = Repository::clone(repo, &path)?;
-            let mut hash = hash.clone().to_string();
+            let mut hash = hash.to_string();
             hash.remove(0);
             println!("hash: {}", hash);
             let obj = repo_cloned.revparse_single(&hash)?;
@@ -50,7 +51,7 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
         } else {
             Repository::clone(&dep.version, &path)?;
         }
-        return Ok(())
+        return Ok(());
     }
 
     let metadata = fetch_package_root_metadata(&dep)?;
@@ -93,13 +94,20 @@ pub fn install_dep(path: &Path, dep: &Dependency) -> Result<()> {
 }
 
 /// Metadata for a specific version of a package
-pub fn fetch_package_version_metadata(dep: &Dependency, version: &String) -> Result<serde_json::Value> {
+pub fn fetch_package_version_metadata(
+    dep: &Dependency,
+    version: &String,
+) -> Result<serde_json::Value> {
     let ssl = NativeTlsClient::new().context("Unable to create a NativeTlsClient")?;
     let connector = HttpsConnector::new(ssl);
     let client = Client::with_connector(connector);
 
-    let url = format!("{}/{}/{}", REGISTRY,
-        utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET), utf8_percent_encode(&version, PATH_SEGMENT_ENCODE_SET));
+    let url = format!(
+        "{}/{}/{}",
+        REGISTRY,
+        utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET),
+        utf8_percent_encode(&version, PATH_SEGMENT_ENCODE_SET)
+    );
 
     let mut body = String::new();
 
@@ -118,7 +126,11 @@ pub fn fetch_package_version_metadata(dep: &Dependency, version: &String) -> Res
 
 /// Metadata for all versions
 pub fn fetch_package_root_metadata(dep: &Dependency) -> Result<serde_json::Value> {
-    let url = format!("{}/{}", REGISTRY, utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET));
+    let url = format!(
+        "{}/{}",
+        REGISTRY,
+        utf8_percent_encode(&dep.name, PATH_SEGMENT_ENCODE_SET)
+    );
 
     let mut body = String::new();
 
@@ -135,7 +147,10 @@ pub fn fetch_package_root_metadata(dep: &Dependency) -> Result<serde_json::Value
     Ok(body)
 }
 
-pub fn fetch_matching_version_metadata<'a>(dep: &'a Dependency, root_metadata: &'a serde_json::Value) -> Result<(&'a String, &'a Value)> {
+pub fn fetch_matching_version_metadata<'a>(
+    dep: &'a Dependency,
+    root_metadata: &'a serde_json::Value,
+) -> Result<(&'a String, &'a Value)> {
     let required_version = Range::new(&dep.version)
         .parse()
         .with_context(|| format!("Version {} of {} didn't parse", dep.version, dep.name))?;

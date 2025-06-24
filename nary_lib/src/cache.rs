@@ -32,7 +32,7 @@ pub const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'}');
 
- /// Cache the given package (key) at version from the given url, returning the (gzipped) tarball.
+/// Cache the given package (key) at version from the given url, returning the (gzipped) tarball.
 pub fn cache(key: &str, version: &str, tarball_url: &Url) -> Result<Vec<u8>> {
     let mut tarball_res = Vec::<u8>::new();
     let mut path = get_cache_dir()?;

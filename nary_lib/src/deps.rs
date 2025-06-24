@@ -9,7 +9,9 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::{fs::File, io, path::Path};
 
-use crate::{fetch_package_root_metadata, fetch_matching_version_metadata, fetch_package_version_metadata};
+use crate::{
+    fetch_matching_version_metadata, fetch_package_root_metadata, fetch_package_version_metadata,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dependency {
@@ -33,7 +35,10 @@ pub fn calculate_depends(
     calculate_depends_rec(root_pkg, deps, &mut map, &mut graph)?;
 
     let dependency_ids = petgraph::algo::toposort(&graph, None).or_else(|err| {
-        Err(anyhow!("Cyclic dependency {:?}", map.get_by_second(&err.node_id())))
+        Err(anyhow!(
+            "Cyclic dependency {:?}",
+            map.get_by_second(&err.node_id())
+        ))
     })?;
 
     let mut ordered_dependencies: IndexMap<Dependency, ()> = IndexMap::new();
@@ -86,7 +91,8 @@ pub fn calculate_depends_rec(
             let matching_version = fetch_matching_version_metadata(&dependency, &root_metadata)?;
             println!("Found version: {}", matching_version.0);
 
-            let package_metadata = fetch_package_version_metadata(&dependency, &matching_version.0)?;
+            let package_metadata =
+                fetch_package_version_metadata(&dependency, &matching_version.0)?;
             // pick the version, then install it to get its ["dependencies"]
 
             // println!("{}", package_metadata);
@@ -114,7 +120,7 @@ pub fn path_to_root_dependency<'a>(file: &Path) -> Result<Dependency> {
 
     Ok(Dependency {
         name: root["name"].as_str().unwrap().to_string(),
-        version: root["version"].as_str().unwrap().to_string()
+        version: root["version"].as_str().unwrap().to_string(),
     })
 }
 
