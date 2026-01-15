@@ -1,9 +1,13 @@
 use nary_lib::deps::*;
+use nary_lib::{calculate_depends_with_config, create_client, NpmrcConfig, RegistryConfig};
 
 use indoc::indoc;
-use std::io::{Cursor};
+use std::io::Cursor;
+use tempfile::TempDir;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use anyhow::{Result};
+use nary_lib::Result;
 
 #[test]
 fn it_will_get_dependency_version() {
@@ -26,20 +30,19 @@ fn it_will_get_dependency_version() {
     "###};
 
     let cursor = Cursor::new(package_json);
-    let dependencies = json_to_dependencies(cursor);
+    let dependencies = json_to_dependencies(cursor, false, "test");
 
     let dependencies = dependencies.unwrap();
     let dep = dependencies.get(0).unwrap();
 
-    assert_eq!(dep.version, "^4.1.0");
-
+    assert_eq!(dep.requested, "^4.1.0");
 }
 
 #[test]
 fn it_will_gather_dependencies() -> Result<()> {
     let koa_ejs = include_str!("repository/koa-ejs.json");
     let cursor = Cursor::new(koa_ejs);
-    let dependencies = json_to_dependencies(cursor);
+    let dependencies = json_to_dependencies(cursor, false, "test");
 
     let dependencies = dependencies?;
     assert_eq!(dependencies.get(0).unwrap().name, "debug");
@@ -49,26 +52,496 @@ fn it_will_gather_dependencies() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn it_will_build_dependency_map() -> Result<()> {
-    let koa_ejs = Cursor::new(include_str!("repository/koa-ejs.json"));
-    let dependencies = json_to_dependencies(koa_ejs);
+/// Mount a mock response for a package (both root and version endpoints)
+async fn mount_package(server: &MockServer, name: &str, body: &str) {
+    // Mount root metadata endpoint
+    Mock::given(method("GET"))
+        .and(path(format!("/{}", name)))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .mount(server)
+        .await;
 
-    let dependencies = dependencies?;
+    // Parse the fixture to mount version-specific endpoints
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(versions) = json.get("versions").and_then(|v| v.as_object()) {
+            for (version, version_data) in versions {
+                let version_body = version_data.to_string();
+                Mock::given(method("GET"))
+                    .and(path(format!("/{}/{}", name, version)))
+                    .respond_with(ResponseTemplate::new(200).set_body_string(version_body))
+                    .mount(server)
+                    .await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn it_will_build_dependency_map_with_mock() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    // Start mock server
+    let mock_server = MockServer::start().await;
+
+    // Mount all package fixtures
+    mount_package(
+        &mock_server,
+        "debug",
+        include_str!("fixtures/registry/debug.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "ms",
+        include_str!("fixtures/registry/ms.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "ejs",
+        include_str!("fixtures/registry/ejs.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "mz",
+        include_str!("fixtures/registry/mz.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "any-promise",
+        include_str!("fixtures/registry/any-promise.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "object-assign",
+        include_str!("fixtures/registry/object-assign.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "thenify-all",
+        include_str!("fixtures/registry/thenify-all.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "thenify",
+        include_str!("fixtures/registry/thenify.json"),
+    )
+    .await;
+
+    // Parse dependencies from package.json
+    let koa_ejs = Cursor::new(include_str!("repository/koa-ejs.json"));
+    let dependencies = json_to_dependencies(koa_ejs, false, "test")?;
+
     assert_eq!(dependencies.get(0).unwrap().name, "debug");
     assert_eq!(dependencies.get(1).unwrap().name, "ejs");
     assert_eq!(dependencies.get(2).unwrap().name, "mz");
 
     let root = Dependency {
         name: "koa_ejs".to_string(),
-        version: "1".to_string(),
+        requested: "1".to_string(),
+        resolved: "1".to_string(),
+        is_optional: false,
+        alias: None,
     };
 
-    let calculated = calculate_depends(&root, &dependencies)?;
+    // Configure to use mock server
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
 
-    for dep in calculated {
-        println!("{:?}", dep);
-    }
+    // Calculate dependencies using mock server
+    let calculated =
+        calculate_depends_with_config(&client, &root, &dependencies, |_, _| {}, &config).await?;
 
+    // Verify we got the expected packages
+    let names: Vec<&str> = calculated.keys().map(|d| d.name.as_str()).collect();
+
+    assert!(names.contains(&"debug"));
+    assert!(names.contains(&"ejs"));
+    assert!(names.contains(&"mz"));
+    assert!(names.contains(&"ms")); // transitive dep of debug
+    assert!(names.contains(&"any-promise")); // transitive dep of mz
+    assert!(names.contains(&"object-assign")); // transitive dep of mz
+    assert!(names.contains(&"thenify-all")); // transitive dep of mz
+    assert!(names.contains(&"thenify")); // transitive dep of thenify-all
+
+    // Verify versions are correctly resolved
+    let debug = calculated.keys().find(|d| d.name == "debug").unwrap();
+    assert_eq!(debug.resolved, "2.6.9");
+
+    let ejs = calculated.keys().find(|d| d.name == "ejs").unwrap();
+    assert_eq!(ejs.resolved, "2.7.4");
+
+    let mz = calculated.keys().find(|d| d.name == "mz").unwrap();
+    assert_eq!(mz.resolved, "2.7.0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_resolves_nested_dependencies() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // Mount packages that form a dependency chain: parent -> child -> grandchild
+    mount_package(
+        &mock_server,
+        "debug",
+        include_str!("fixtures/registry/debug.json"),
+    )
+    .await;
+    mount_package(
+        &mock_server,
+        "ms",
+        include_str!("fixtures/registry/ms.json"),
+    )
+    .await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "debug".to_string(),
+        requested: "^2.6.1".to_string(),
+        resolved: String::new(), // Will be resolved
+        is_optional: false,
+        alias: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    let calculated =
+        calculate_depends_with_config(&client, &root, &dependencies, |_, _| {}, &config).await?;
+
+    // Should have both debug and its transitive dependency ms
+    let names: Vec<&str> = calculated.keys().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"debug"));
+    assert!(names.contains(&"ms"));
+
+    // Verify ms was correctly resolved
+    let ms = calculated.keys().find(|d| d.name == "ms").unwrap();
+    assert_eq!(ms.resolved, "2.0.0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_routes_scoped_packages_to_private_registry() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    // Start two mock servers: default (public) and private
+    let public_server = MockServer::start().await;
+    let private_server = MockServer::start().await;
+
+    // Mount debug on public registry
+    mount_package(
+        &public_server,
+        "debug",
+        include_str!("fixtures/registry/debug.json"),
+    )
+    .await;
+    mount_package(
+        &public_server,
+        "ms",
+        include_str!("fixtures/registry/ms.json"),
+    )
+    .await;
+
+    // Mount scoped package on private registry (both root and version endpoints)
+    let scoped_fixture = include_str!("fixtures/registry/@myorg/utils.json");
+    Mock::given(method("GET"))
+        .and(path("/@myorg/utils"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(scoped_fixture))
+        .mount(&private_server)
+        .await;
+
+    // Mount version endpoint for scoped package
+    Mock::given(method("GET"))
+        .and(path("/@myorg/utils/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"name":"@myorg/utils","version":"1.0.0","dist":{"tarball":"https://npm.myorg.com/@myorg/utils/-/utils-1.0.0.tgz","integrity":"sha512-abc123def456=="}}"#
+        ))
+        .mount(&private_server)
+        .await;
+
+    // Configure scoped registry
+    let mut npmrc = NpmrcConfig::default();
+    npmrc
+        .scoped_registries
+        .insert("@myorg".to_string(), private_server.uri());
+
+    let config = RegistryConfig::with_config(npmrc, public_server.uri());
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![
+        Dependency {
+            name: "debug".to_string(),
+            requested: "^2.6.0".to_string(),
+            resolved: String::new(),
+            is_optional: false,
+            alias: None,
+        },
+        Dependency {
+            name: "@myorg/utils".to_string(),
+            requested: "^1.0.0".to_string(),
+            resolved: String::new(),
+            is_optional: false,
+            alias: None,
+        },
+    ];
+
+    let client = create_client()?;
+    let calculated =
+        calculate_depends_with_config(&client, &root, &dependencies, |_, _| {}, &config).await?;
+
+    // Verify both packages were resolved
+    let names: Vec<&str> = calculated.keys().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"debug"));
+    assert!(names.contains(&"@myorg/utils"));
+    assert!(names.contains(&"ms")); // transitive dep
+
+    // Verify versions
+    let scoped = calculated
+        .keys()
+        .find(|d| d.name == "@myorg/utils")
+        .unwrap();
+    assert_eq!(scoped.resolved, "1.0.0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_sends_bearer_token_auth_header() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // Extract host from mock server URI
+    let uri = mock_server.uri();
+    let host = uri.strip_prefix("http://").unwrap_or(&uri);
+
+    // Mount package that requires auth - verify header is present
+    Mock::given(method("GET"))
+        .and(path("/debug"))
+        .and(header("authorization", "Bearer secret-token-123"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(include_str!("fixtures/registry/debug.json")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/ms"))
+        .and(header("authorization", "Bearer secret-token-123"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(include_str!("fixtures/registry/ms.json")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    // Mount version endpoints with auth
+    Mock::given(method("GET"))
+        .and(path("/debug/2.6.9"))
+        .and(header("authorization", "Bearer secret-token-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"name":"debug","version":"2.6.9","dependencies":{"ms":"2.0.0"},"dist":{"tarball":"https://registry.npmjs.org/debug/-/debug-2.6.9.tgz","integrity":"sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA=="}}"#,
+        ))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/ms/2.0.0"))
+        .and(header("authorization", "Bearer secret-token-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"name":"ms","version":"2.0.0","dist":{"tarball":"https://registry.npmjs.org/ms/-/ms-2.0.0.tgz","integrity":"sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A=="}}"#,
+        ))
+        .mount(&mock_server)
+        .await;
+
+    // Configure auth token
+    let mut npmrc = NpmrcConfig::default();
+    npmrc
+        .auth_tokens
+        .insert(host.to_string(), "secret-token-123".to_string());
+
+    let config = RegistryConfig::with_config(npmrc, mock_server.uri());
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "debug".to_string(),
+        requested: "^2.6.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+    }];
+
+    let client = create_client()?;
+    let calculated =
+        calculate_depends_with_config(&client, &root, &dependencies, |_, _| {}, &config).await?;
+
+    // If we got here without error, the auth header was accepted
+    let names: Vec<&str> = calculated.keys().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"debug"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_sends_basic_auth_header() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    let uri = mock_server.uri();
+    let host = uri.strip_prefix("http://").unwrap_or(&uri);
+
+    // Mount package that requires basic auth
+    Mock::given(method("GET"))
+        .and(path("/debug"))
+        .and(header("authorization", "Basic dXNlcjpwYXNz")) // base64("user:pass")
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(include_str!("fixtures/registry/debug.json")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/ms"))
+        .and(header("authorization", "Basic dXNlcjpwYXNz"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(include_str!("fixtures/registry/ms.json")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    // Mount version endpoints with auth
+    Mock::given(method("GET"))
+        .and(path("/debug/2.6.9"))
+        .and(header("authorization", "Basic dXNlcjpwYXNz"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"name":"debug","version":"2.6.9","dependencies":{"ms":"2.0.0"},"dist":{"tarball":"https://registry.npmjs.org/debug/-/debug-2.6.9.tgz","integrity":"sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA=="}}"#,
+        ))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/ms/2.0.0"))
+        .and(header("authorization", "Basic dXNlcjpwYXNz"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"name":"ms","version":"2.0.0","dist":{"tarball":"https://registry.npmjs.org/ms/-/ms-2.0.0.tgz","integrity":"sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A=="}}"#,
+        ))
+        .mount(&mock_server)
+        .await;
+
+    // Configure legacy auth (base64 encoded user:pass)
+    let mut npmrc = NpmrcConfig::default();
+    npmrc
+        .legacy_auth
+        .insert(host.to_string(), "dXNlcjpwYXNz".to_string());
+
+    let config = RegistryConfig::with_config(npmrc, mock_server.uri());
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "debug".to_string(),
+        requested: "^2.6.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+    }];
+
+    let client = create_client()?;
+    let calculated =
+        calculate_depends_with_config(&client, &root, &dependencies, |_, _| {}, &config).await?;
+
+    let names: Vec<&str> = calculated.keys().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"debug"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_handles_401_unauthorized() -> Result<(), Box<dyn std::error::Error>> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // Mount package that returns 401
+    Mock::given(method("GET"))
+        .and(path("/private-pkg"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+        .mount(&mock_server)
+        .await;
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "private-pkg".to_string(),
+        requested: "^1.0.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+    }];
+
+    let client = create_client()?;
+    let result =
+        calculate_depends_with_config(&client, &root, &dependencies, |_, _| {}, &config).await;
+
+    // Should return an error for 401
+    assert!(result.is_err());
     Ok(())
 }

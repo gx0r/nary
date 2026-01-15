@@ -1,0 +1,8 @@
+{
+  "name": "sandbox-safe-test",
+  "version": "1.0.0",
+  "description": "Tests that legitimate postinstall scripts work in sandbox",
+  "dependencies": {
+    "esbuild": "^0.20.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "thenify",
+  "dist-tags": {
+    "latest": "3.3.1"
+  },
+  "versions": {
+    "3.3.1": {
+      "name": "thenify",
+      "version": "3.3.1",
+      "dependencies": {
+        "any-promise": "^1.0.0"
+      },
+      "dist": {
+        "tarball": "https://registry.npmjs.org/thenify/-/thenify-3.3.1.tgz",
+        "integrity": "sha512-RVZSIV5IG10Hk3enotrhvz0T9em6cyHBLkH/YAZuKqd8hRkKhSfCGIcP2KUY0EPxndzANBmNllzWPwak+bheSw=="
+      }
+    }
+  }
+}

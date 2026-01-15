@@ -1,0 +1,9 @@
+{
+  "name": "@test/app",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@test/shared": "workspace:*",
+    "express": "^4.21.0"
+  }
+}

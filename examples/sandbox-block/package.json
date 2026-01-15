@@ -1,0 +1,8 @@
+{
+  "name": "sandbox-block-test",
+  "version": "1.0.0",
+  "description": "Tests that sandbox blocks access to sensitive files",
+  "scripts": {
+    "test-sandbox": "node test-sandbox.js"
+  }
+}

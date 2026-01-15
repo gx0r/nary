@@ -7,12 +7,22 @@ publish = false
 
 [dependencies]
 nary_lib = { path = "../nary_lib" }
-anyhow = "1.0.75"
-structopt = "0.3.26"
-serde_json = "1.0.108"
-serde_derive = "1.0.193"
-dirs = "5.0.1"
-indicatif = { version = "0.17.7", features = ["improved_unicode"] }
+snafu.workspace = true
+reqwest.workspace = true
+atty = "0.2"
+bytesize = "1"
+clap = { version = "4", features = ["derive"] }
+owo-colors = { version = "4", features = ["supports-colors"] }
+serde_json.workspace = true
+serde_derive.workspace = true
+dirs.workspace = true
+indicatif = { version = "0.18", features = ["improved_unicode"] }
+tokio.workspace = true
+futures.workspace = true
+terminal_size = "0.4"
+dashmap.workspace = true
+pathdiff.workspace = true
+node-semver.workspace = true
 
 [[bin]]
 name = "nary"

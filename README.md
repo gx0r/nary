@@ -1,51 +1,125 @@
 # nary
-Nary stands for "Nary ain't Rusty Yarn"
 
-Toy npm-like installer to see what writing one in Rust could be like.
+Nary stands for "Nary's A Rusty Yarn"
 
-Some ideas are:
- * Focus on security and error handling at all possible failure points
- * Creating the traditional nested directory hierarchy (not particularly interested in flattening)
- * Not focued on performance yet
- * Dependency resolution not fully implemented yet
+A fast, secure npm-like package manager written in Rust.
 
-## Example
+## Features
 
-git clone first
+- Full npm registry support with scoped packages and authentication
+- Workspace support (npm workspaces format)
+- Lockfile support (package-lock.json v3)
+- Git dependencies (branches, tags, and commit hashes)
+- Integrity verification (SHA-512)
+- Live dependency tree visualization during install
+- Lifecycle scripts with [sandboxing](https://igorstechnoclub.com/sandbox-exec/) on macOS
+- Prompt to confirm scripts before running
+
+## Install
+
+> cargo install --path nary_bin
+
+## Commands
+
+### Package Management
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `install` | `i` | Install dependencies from package.json |
+| `add` | | Add a package to dependencies |
+| `remove` | `uninstall`, `rm` | Remove a package |
+| `ci` | | Clean install from lockfile (CI/CD) |
+| `prune` | | Remove extraneous packages |
+
+### Scripts
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `run` | | Run a script from package.json |
+| `test` | `t` | Run the test script |
+| `start` | | Run the start script |
+| `stop` | | Run the stop script |
+| `restart` | | Run stop then start |
+
+### Inspection
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `list` | `ls` | List installed packages |
+| `outdated` | | Show outdated packages |
+| `find-dupes` | | Find duplicate packages |
+
+### Maintenance
+
+| Command | Description |
+|---------|-------------|
+| `update` | Update packages within semver range |
+| `dedupe` | Reduce duplication by hoisting |
+| `audit` | Check for vulnerabilities |
+
+### Development
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `link` | | Symlink a package for local development |
+| `unlink` | | Remove a linked package |
+| `exec` | `x` | Run a package binary (like npx) |
+| `version` | | Bump version and create git tag |
+
+### Common Options
+
+- `-v, --verbose` - Verbose output (repeatable: -vv, -vvv)
+- `--json` - JSON output (list, outdated, audit, find-dupes)
+- `--dry-run` - Preview changes (prune, dedupe, update)
+
+## Usage
+
+### Install dependencies
 
 ```
-cd nary/nary_bin
-cargo install --path . --force
-cd ../examples/boiler
-nary
-
-[00:00:00] █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       1/25      
-[00:00:00] ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       2/25      aphrodite@^1.2.3
-[00:00:00] ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       3/25      html-template-tag@^1.0.0
-[00:00:00] ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       4/25      koa@^2.3.0
-[00:00:00] ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       5/25      koa-bodyparser@^4.2.0
-[00:00:00] █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       6/25      koa-compress@^2.0.0
-[00:00:01] ███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░       7/25      koa-conditional-get@^2.0.0
-[00:00:01] ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░       8/25      koa-ejs@^4.1.0
-[00:00:01] ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░       9/25      koa-etag@^3.0.0
-[00:00:01] ████████████████░░░░░░░░░░░░░░░░░░░░░░░░      10/25      koa-favicon@^2.0.0
-[00:00:01] █████████████████░░░░░░░░░░░░░░░░░░░░░░░      11/25      koa-helmet@^3.2.0
-[00:00:02] ███████████████████░░░░░░░░░░░░░░░░░░░░░      12/25      koa-morgan@^1.0.1
-[00:00:02] ████████████████████░░░░░░░░░░░░░░░░░░░░      13/25      koa-mount@3.0.0
-[00:00:02] ██████████████████████░░░░░░░░░░░░░░░░░░      14/25      koa-response-time@^2.0.0
-[00:00:02] ████████████████████████░░░░░░░░░░░░░░░░      15/25      koa-router@^7.2.1
-[00:00:02] █████████████████████████░░░░░░░░░░░░░░░      16/25      koa-session@^5.5.0
-[00:00:02] ███████████████████████████░░░░░░░░░░░░░      17/25      koa-static@^4.0.1
-[00:00:02] ████████████████████████████░░░░░░░░░░░░      18/25      koa-trie-router@^2.1.6
-[00:00:03] ██████████████████████████████░░░░░░░░░░      19/25      marko@^4.4.26
-[00:00:03] ████████████████████████████████░░░░░░░░      20/25      pem@^1.9.7
-[00:00:03] █████████████████████████████████░░░░░░░      21/25      promise-delay@^2.1.0
-[00:00:03] ███████████████████████████████████░░░░░      22/25      socket.io@^2.0.3
-[00:00:04] ████████████████████████████████████░░░░      23/25      socketio-sticky-session@git://github.com/wzrdtales/socket-io-sticky-session.git#2d0367fd7c80c727923f33d2ac11e34d0267ae4c
-[00:00:04] ██████████████████████████████████████░░      24/25      spdy@^3.4.7
+cd your-project
+nary install
 ```
 
+During install, nary displays a live tree of in-flight packages:
 
+```
+[00:00:02] ████████████████░░░░░░░░░░░░░░░░░░░░░░░░      42/103  Installing...
+  ⠋ koa@2.15.3
+    ├─⠋ accepts@1.3.8
+    ├─⠋ content-disposition@0.5.4
+    └─⠋ cookies@0.9.1
+```
+
+### Add a package
+
+```
+nary add lodash
+nary add -D typescript    # dev dependency
+nary add express@^4.0.0   # specific version range
+```
+
+### Run scripts
+
+```
+nary run build
+nary test                 # shortcut for 'nary run test'
+```
+
+### Execute a package binary
+
+```
+nary exec cowsay "Hello"
+nary x typescript --version
+```
+
+### Check for updates
+
+```
+nary outdated
+nary update              # update within semver range
+nary update --latest     # update to latest versions
+```
 
 ## License
 
@@ -55,4 +129,3 @@ Licensed under either of
  * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
-
