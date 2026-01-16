@@ -120,6 +120,7 @@ pub fn deps_from_lockfile(lock: &PackageLock) -> IndexMap<Dependency, ResolvedIn
             dependencies: deps,
             install_path: key.clone(), // Preserve full install path including nested paths
             deprecated: None,          // Not tracked in lockfile
+            maturity_fallback: None,   // Not tracked in lockfile
         };
         result.insert(dep, info);
     }
@@ -347,5 +348,64 @@ mod tests {
             .collect();
         assert!(dep_names.contains(&"body-parser"));
         assert!(dep_names.contains(&"cookie"));
+    }
+
+    #[test]
+    fn test_lockfile_round_trip_maturity_fallback_none() {
+        use crate::lockfile_writer::{build_package_lock, write_package_lock};
+        use tempfile::TempDir;
+
+        // Create dependencies with maturity_fallback set (simulating a fallback scenario)
+        let mut deps = IndexMap::new();
+        deps.insert(
+            Dependency {
+                name: "lodash".to_string(),
+                requested: "^4.17.0".to_string(),
+                resolved: "4.17.21".to_string(),
+                is_optional: false,
+                alias: None,
+            },
+            ResolvedInfo {
+                tarball_url: Some(
+                    "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz".to_string(),
+                ),
+                integrity: Some("sha512-v2kDEe57abc".to_string()),
+                dependencies: vec![],
+                install_path: "node_modules/lodash".to_string(),
+                deprecated: None,
+                // This would be set if we fell back from a newer version
+                maturity_fallback: Some(crate::maturity::MaturityFallbackInfo {
+                    skipped_version: "4.18.0".to_string(),
+                    skipped_published_at: chrono::Utc::now(),
+                    skipped_age_minutes: 60,
+                    required_age_minutes: 4320,
+                }),
+            },
+        );
+
+        // Build and write the lockfile
+        let lock = build_package_lock("test-app", "1.0.0", &deps);
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("package-lock.json");
+        write_package_lock(&path, &lock).unwrap();
+
+        // Read the lockfile back
+        let read_lock = read_package_lock(&path).unwrap();
+
+        // Convert back to deps
+        let read_deps = deps_from_lockfile(&read_lock);
+
+        // Verify maturity_fallback is None (not persisted in lockfile)
+        let lodash = read_deps.iter().find(|(d, _)| d.name == "lodash").unwrap();
+        assert!(
+            lodash.1.maturity_fallback.is_none(),
+            "maturity_fallback should be None when read from lockfile"
+        );
+
+        // Verify other fields are preserved correctly
+        assert_eq!(lodash.0.resolved, "4.17.21");
+        assert!(lodash.1.tarball_url.is_some());
+        assert!(lodash.1.integrity.is_some());
     }
 }

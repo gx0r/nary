@@ -10,6 +10,7 @@ pub mod list;
 pub mod remove;
 pub mod script;
 pub mod version;
+pub mod why;
 
 pub use add::run_add;
 pub use audit::{run_audit, run_outdated, run_update};
@@ -23,6 +24,7 @@ pub use list::{run_find_dupes, run_list, run_prune};
 pub use remove::run_remove;
 pub use script::{run_binary, run_script};
 pub use version::run_version;
+pub use why::run_why;
 
 #[cfg(target_os = "macos")]
 pub mod sandbox;

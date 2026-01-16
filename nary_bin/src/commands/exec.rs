@@ -115,6 +115,7 @@ pub async fn run_exec(args: &ExecArgs) -> Result<()> {
                     &abs_install_path.to_string_lossy(),
                     info.tarball_url.as_deref(),
                     info.integrity.as_deref(),
+                    false, // exec always requires network
                 )
                 .await;
                 (dep.name.clone(), result)

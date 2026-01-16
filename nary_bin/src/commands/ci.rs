@@ -19,6 +19,11 @@ use crate::{CiArgs, MAX_CONCURRENT};
 pub async fn run_ci(args: &CiArgs) -> Result<()> {
     let root_path = Path::new(".");
     let lockfile_path = root_path.join("package-lock.json");
+    let offline = args.offline;
+
+    if offline {
+        eprintln!("Running in offline mode - using cached packages only");
+    }
 
     // Require lockfile
     let lock = read_package_lock(&lockfile_path).context(NoLockfileSnafu)?;
@@ -65,6 +70,7 @@ pub async fn run_ci(args: &CiArgs) -> Result<()> {
                     &info.install_path,
                     info.tarball_url.as_deref(),
                     info.integrity.as_deref(),
+                    offline,
                 )
                 .await;
 

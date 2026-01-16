@@ -9,9 +9,10 @@ use std::sync::Arc;
 use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 
 use nary_lib::{
-    build_package_lock, calculate_depends, create_client, deps_from_lockfile, get_audit_summary,
-    install_dep_with_tarball_url, path_to_dependencies, path_to_root_dependency, read_package_lock,
-    scan_node_modules, write_package_lock, LifecycleRunner, ScriptAudit, WorkspaceConfig,
+    build_package_lock, calculate_depends_with_options, create_client, deps_from_lockfile,
+    get_audit_summary, install_dep_with_tarball_url, path_to_dependencies, path_to_root_dependency,
+    read_package_lock, scan_node_modules, write_package_lock, LifecycleRunner, MaturityConfig,
+    NpmrcConfig, ResolveOptions, ScriptAudit, WorkspaceConfig, DEFAULT_MATURITY_MINUTES,
 };
 
 use crate::error::Result;
@@ -97,6 +98,8 @@ pub async fn run_install(args: &InstallArgs) -> Result<()> {
             args.no_package_lock,
             args.assume_yes,
             !args.no_sandbox,
+            args.allow_new_packages,
+            args.offline,
         )
         .await
     } else {
@@ -107,6 +110,8 @@ pub async fn run_install(args: &InstallArgs) -> Result<()> {
             args.no_package_lock,
             args.assume_yes,
             !args.no_sandbox,
+            args.allow_new_packages,
+            args.offline,
         )
         .await
     }
@@ -120,6 +125,8 @@ async fn install_workspace(
     no_package_lock: bool,
     assume_yes: bool,
     sandbox: bool,
+    allow_new_packages: bool,
+    offline: bool,
 ) -> Result<()> {
     use nary_lib::{workspace::is_workspace_protocol, Dependency};
     use std::sync::atomic::AtomicU64;
@@ -162,6 +169,25 @@ async fn install_workspace(
     let lockfile_path = root_path.join("package-lock.json");
     let root = path_to_root_dependency(root_path)?;
 
+    // Build maturity config from .npmrc and CLI flag
+    let npmrc = NpmrcConfig::load();
+    let maturity_config = MaturityConfig {
+        minimum_age_minutes: npmrc
+            .minimum_release_age
+            .unwrap_or(DEFAULT_MATURITY_MINUTES),
+        excluded_packages: npmrc.maturity_exclude.clone(),
+        allow_new_packages,
+    };
+    let resolve_options = ResolveOptions {
+        optimize: false,
+        maturity: maturity_config,
+        offline,
+    };
+
+    if offline {
+        eprintln!("Running in offline mode - using cached packages only");
+    }
+
     let depends = if let Some(lock) = read_package_lock(&lockfile_path) {
         eprintln!("Using existing package-lock.json");
         deps_from_lockfile(&lock)
@@ -177,12 +203,34 @@ async fn install_workspace(
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
         spinner.set_message("Resolving workspace dependencies...");
 
-        let depends = calculate_depends(&client, &root, &all_deps, |name, version| {
-            spinner.set_message(format!("Resolving {}@{}", name, version));
-        })
+        let depends = calculate_depends_with_options(
+            &client,
+            &root,
+            &all_deps,
+            |name, version| {
+                spinner.set_message(format!("Resolving {}@{}", name, version));
+            },
+            &Default::default(),
+            &resolve_options,
+        )
         .await?;
 
         spinner.finish_and_clear();
+
+        // Print maturity fallback warnings
+        for (dep, info) in &depends {
+            if let Some(fallback) = &info.maturity_fallback {
+                eprintln!(
+                    "{} {}@{} skipped (published {}, requires {} maturity) -> using {}",
+                    "warn:".if_supports_color(Stream::Stderr, |s| s.yellow()),
+                    dep.name,
+                    fallback.skipped_version,
+                    fallback.format_age(),
+                    fallback.format_required(),
+                    dep.resolved
+                );
+            }
+        }
 
         // Write package-lock.json
         if !no_package_lock {
@@ -224,6 +272,7 @@ async fn install_workspace(
                     &info.install_path,
                     info.tarball_url.as_deref(),
                     info.integrity.as_deref(),
+                    offline,
                 )
                 .await;
 
@@ -357,6 +406,8 @@ async fn install(
     no_package_lock: bool,
     assume_yes: bool,
     sandbox: bool,
+    allow_new_packages: bool,
+    offline: bool,
 ) -> Result<()> {
     use dashmap::DashMap;
     use std::sync::atomic::AtomicU64;
@@ -378,6 +429,25 @@ async fn install(
     let lockfile_path = root_path.join("package-lock.json");
     let root = path_to_root_dependency(root_path)?;
 
+    // Build maturity config from .npmrc and CLI flag
+    let npmrc = NpmrcConfig::load();
+    let maturity_config = MaturityConfig {
+        minimum_age_minutes: npmrc
+            .minimum_release_age
+            .unwrap_or(DEFAULT_MATURITY_MINUTES),
+        excluded_packages: npmrc.maturity_exclude.clone(),
+        allow_new_packages,
+    };
+    let resolve_options = ResolveOptions {
+        optimize: false,
+        maturity: maturity_config,
+        offline,
+    };
+
+    if offline {
+        eprintln!("Running in offline mode - using cached packages only");
+    }
+
     let depends = if let Some(lock) = read_package_lock(&lockfile_path) {
         eprintln!("Using existing package-lock.json");
         deps_from_lockfile(&lock)
@@ -395,12 +465,34 @@ async fn install(
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
         spinner.set_message("Resolving dependencies...");
 
-        let depends = calculate_depends(&client, &root, &dependencies, |name, version| {
-            spinner.set_message(format!("Resolving {}@{}", name, version));
-        })
+        let depends = calculate_depends_with_options(
+            &client,
+            &root,
+            &dependencies,
+            |name, version| {
+                spinner.set_message(format!("Resolving {}@{}", name, version));
+            },
+            &Default::default(),
+            &resolve_options,
+        )
         .await?;
 
         spinner.finish_and_clear();
+
+        // Print maturity fallback warnings
+        for (dep, info) in &depends {
+            if let Some(fallback) = &info.maturity_fallback {
+                eprintln!(
+                    "{} {}@{} skipped (published {}, requires {} maturity) -> using {}",
+                    "warn:".if_supports_color(Stream::Stderr, |s| s.yellow()),
+                    dep.name,
+                    fallback.skipped_version,
+                    fallback.format_age(),
+                    fallback.format_required(),
+                    dep.resolved
+                );
+            }
+        }
 
         // Write package-lock.json
         if !no_package_lock {
@@ -587,6 +679,7 @@ async fn install(
                 &info.install_path,
                 info.tarball_url.as_deref(),
                 info.integrity.as_deref(),
+                offline,
             )
             .await;
 

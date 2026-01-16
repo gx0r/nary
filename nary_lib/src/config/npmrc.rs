@@ -16,6 +16,12 @@ pub struct NpmrcConfig {
 
     /// Legacy _auth values: registry host -> base64 encoded user:pass
     pub legacy_auth: HashMap<String, String>,
+
+    /// Minimum release age in minutes for package maturity check (nary-specific)
+    pub minimum_release_age: Option<u64>,
+
+    /// Packages excluded from maturity age check (nary-specific)
+    pub maturity_exclude: Vec<String>,
 }
 
 impl NpmrcConfig {
@@ -56,6 +62,14 @@ impl NpmrcConfig {
                         .trim_end_matches(":_auth")
                         .trim_end_matches('/');
                     config.legacy_auth.insert(host.to_string(), value);
+                } else if key == "nary-minimum-release-age" {
+                    // nary-minimum-release-age=<minutes>
+                    if let Ok(minutes) = value.parse::<u64>() {
+                        config.minimum_release_age = Some(minutes);
+                    }
+                } else if key == "nary-maturity-exclude[]" {
+                    // nary-maturity-exclude[]=<package-name>
+                    config.maturity_exclude.push(value);
                 }
             }
         }
@@ -99,6 +113,10 @@ impl NpmrcConfig {
         self.scoped_registries.extend(other.scoped_registries);
         self.auth_tokens.extend(other.auth_tokens);
         self.legacy_auth.extend(other.legacy_auth);
+        if other.minimum_release_age.is_some() {
+            self.minimum_release_age = other.minimum_release_age;
+        }
+        self.maturity_exclude.extend(other.maturity_exclude);
     }
 }
 
@@ -184,6 +202,117 @@ registry=https://registry.npmjs.org/
         assert_eq!(
             config.registry,
             Some("https://registry.npmjs.org/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_maturity_release_age() {
+        let content = "nary-minimum-release-age=4320";
+        let config = NpmrcConfig::parse(content);
+        assert_eq!(config.minimum_release_age, Some(4320));
+    }
+
+    #[test]
+    fn test_parse_maturity_release_age_invalid() {
+        let content = "nary-minimum-release-age=not-a-number";
+        let config = NpmrcConfig::parse(content);
+        assert_eq!(config.minimum_release_age, None);
+    }
+
+    #[test]
+    fn test_parse_maturity_exclude() {
+        let content = r#"
+nary-maturity-exclude[]=lodash
+nary-maturity-exclude[]=express
+nary-maturity-exclude[]=@types
+"#;
+        let config = NpmrcConfig::parse(content);
+        assert_eq!(config.maturity_exclude.len(), 3);
+        assert!(config.maturity_exclude.contains(&"lodash".to_string()));
+        assert!(config.maturity_exclude.contains(&"express".to_string()));
+        assert!(config.maturity_exclude.contains(&"@types".to_string()));
+    }
+
+    #[test]
+    fn test_parse_maturity_all_options() {
+        let content = r#"
+registry=https://registry.npmjs.org/
+nary-minimum-release-age=1440
+nary-maturity-exclude[]=lodash
+nary-maturity-exclude[]=react
+"#;
+        let config = NpmrcConfig::parse(content);
+        assert_eq!(
+            config.registry,
+            Some("https://registry.npmjs.org/".to_string())
+        );
+        assert_eq!(config.minimum_release_age, Some(1440));
+        assert_eq!(config.maturity_exclude.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_maturity_settings() {
+        // Simulate global config with default maturity settings
+        let global_content = r#"
+registry=https://registry.npmjs.org/
+nary-minimum-release-age=4320
+nary-maturity-exclude[]=lodash
+"#;
+        let mut global = NpmrcConfig::parse(global_content);
+
+        // Project config overrides minimum age and adds more exclusions
+        let project_content = r#"
+nary-minimum-release-age=1440
+nary-maturity-exclude[]=express
+nary-maturity-exclude[]=react
+"#;
+        let project = NpmrcConfig::parse(project_content);
+
+        // Merge: project takes precedence
+        global.merge(project);
+
+        // minimum_release_age should be overridden by project
+        assert_eq!(global.minimum_release_age, Some(1440));
+
+        // maturity_exclude should be merged (global + project)
+        assert_eq!(global.maturity_exclude.len(), 3);
+        assert!(global.maturity_exclude.contains(&"lodash".to_string()));
+        assert!(global.maturity_exclude.contains(&"express".to_string()));
+        assert!(global.maturity_exclude.contains(&"react".to_string()));
+
+        // registry from global should remain (project didn't override)
+        assert_eq!(
+            global.registry,
+            Some("https://registry.npmjs.org/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_maturity_no_override() {
+        // Global has maturity settings
+        let global_content = r#"
+nary-minimum-release-age=4320
+nary-maturity-exclude[]=lodash
+"#;
+        let mut global = NpmrcConfig::parse(global_content);
+
+        // Project has no maturity settings
+        let project_content = r#"
+registry=https://custom.registry.com/
+"#;
+        let project = NpmrcConfig::parse(project_content);
+
+        global.merge(project);
+
+        // Global maturity settings should remain unchanged
+        assert_eq!(global.minimum_release_age, Some(4320));
+        assert_eq!(global.maturity_exclude.len(), 1);
+        assert!(global.maturity_exclude.contains(&"lodash".to_string()));
+
+        // Project registry should be applied
+        assert_eq!(
+            global.registry,
+            Some("https://custom.registry.com/".to_string())
         );
     }
 }

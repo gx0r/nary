@@ -10,12 +10,13 @@ use std::{fs::File, io, path::Path, sync::Arc};
 use tokio::sync::watch;
 
 use crate::config::RegistryConfig;
-use crate::error::{FileReadSnafu, JsonParseSnafu, Result};
+use crate::error::{FileReadSnafu, JsonParseSnafu, OfflineMetadataNotCachedSnafu, Result};
 use crate::{
-    fetch_matching_version_metadata, fetch_package_root_metadata_conditional_with_config,
-    fetch_package_root_metadata_with_config, fetch_package_version_metadata_with_config,
-    load_root_metadata_async, load_version_metadata_async, platform_matches,
-    save_root_metadata_async, save_version_metadata_async, FetchResult,
+    fetch_matching_version_metadata_with_maturity,
+    fetch_package_root_metadata_conditional_with_config, fetch_package_root_metadata_with_config,
+    fetch_package_version_metadata_with_config, load_root_metadata_async,
+    load_version_metadata_async, platform_matches, save_root_metadata_async,
+    save_version_metadata_async, FetchResult, MaturityConfig, MaturityFallbackInfo,
 };
 
 /// Thread-safe cache for package metadata to avoid duplicate network requests
@@ -27,6 +28,8 @@ pub struct MetadataCache {
     // Track in-flight requests to coalesce duplicate concurrent fetches
     root_inflight: DashMap<String, watch::Receiver<Option<Arc<Value>>>>,
     version_inflight: DashMap<String, watch::Receiver<Option<Arc<Value>>>>,
+    /// Offline mode: only use cached packages, fail if not available
+    offline: bool,
 }
 
 /// Wait for an in-flight request to complete and return its result
@@ -53,6 +56,10 @@ impl MetadataCache {
     }
 
     pub fn with_config(client: Client, config: RegistryConfig) -> Self {
+        Self::with_options(client, config, false)
+    }
+
+    pub fn with_options(client: Client, config: RegistryConfig, offline: bool) -> Self {
         Self {
             client,
             config,
@@ -60,6 +67,7 @@ impl MetadataCache {
             version: DashMap::new(),
             root_inflight: DashMap::new(),
             version_inflight: DashMap::new(),
+            offline,
         }
     }
 
@@ -67,7 +75,7 @@ impl MetadataCache {
     /// 1. In-memory cache (fastest)
     /// 2. Wait for in-flight request if one exists
     /// 3. Filesystem cache with ETag validation
-    /// 4. Network fetch (slowest)
+    /// 4. Network fetch (slowest) - skipped in offline mode
     async fn get_root_metadata(&self, dep: &Dependency) -> Result<Arc<Value>> {
         // 1. Check in-memory cache first (cheap Arc clone)
         if let Some(cached) = self.root.get(&dep.name) {
@@ -90,6 +98,29 @@ impl MetadataCache {
 
         // 5. Check filesystem cache and get ETag for conditional request (async)
         let fs_cached = load_root_metadata_async(&dep.name).await;
+
+        // In offline mode, only use filesystem cache - no network requests
+        if self.offline {
+            let result = match &fs_cached {
+                Some(cached) if cached.data["versions"].is_object() => {
+                    let data = Arc::new(cached.data.clone());
+                    self.root.insert(dep.name.clone(), Arc::clone(&data));
+                    data
+                }
+                _ => {
+                    // Not in cache and offline - fail
+                    self.root_inflight.remove(&dep.name);
+                    return OfflineMetadataNotCachedSnafu {
+                        package: dep.name.clone(),
+                    }
+                    .fail();
+                }
+            };
+            let _ = tx.send(Some(Arc::clone(&result)));
+            self.root_inflight.remove(&dep.name);
+            return Ok(result);
+        }
+
         // Only use ETag if cached data has valid versions field
         let cached_etag = fs_cached.as_ref().and_then(|c| {
             if c.data["versions"].is_object() {
@@ -150,6 +181,7 @@ impl MetadataCache {
 
     /// Fetch version metadata for a resolved dependency, using layered caching.
     /// Version metadata is immutable once published, so no ETag needed.
+    /// In offline mode, only uses cache - fails if not found.
     async fn get_version_metadata(&self, dep: &Dependency) -> Result<Arc<Value>> {
         let key = format!("{}@{}", dep.name, dep.resolved);
 
@@ -182,6 +214,15 @@ impl MetadataCache {
             return Ok(cached);
         }
 
+        // In offline mode, if not in cache, fail
+        if self.offline {
+            self.version_inflight.remove(&key);
+            return OfflineMetadataNotCachedSnafu {
+                package: format!("{}@{}", dep.name, dep.resolved),
+            }
+            .fail();
+        }
+
         // 6. Fetch from network and save to both caches (async)
         let metadata = fetch_package_version_metadata_with_config(
             &self.client,
@@ -211,6 +252,7 @@ pub struct ResolvedInfo {
     pub dependencies: Vec<(String, String)>, // (name, version_range) for lockfile
     pub install_path: String, // e.g., "node_modules/lodash" or "node_modules/express/node_modules/lodash"
     pub deprecated: Option<String>, // Deprecation warning message if package is deprecated
+    pub maturity_fallback: Option<MaturityFallbackInfo>, // Info if a newer version was skipped due to maturity check
 }
 
 /// A peer dependency requirement
@@ -249,6 +291,7 @@ struct ResolvedDepInfo {
     peer_deps: Vec<PeerDependency>,
     platform: PlatformConstraints,
     deprecated: Option<String>,
+    maturity_fallback: Option<MaturityFallbackInfo>,
 }
 
 /// Fetch and resolve multiple dependencies in parallel using async
@@ -256,14 +299,18 @@ struct ResolvedDepInfo {
 async fn fetch_deps_parallel(
     deps: &[Dependency],
     cache: &Arc<MetadataCache>,
+    maturity_config: &MaturityConfig,
 ) -> Vec<Result<ResolvedDepInfo>> {
     const MAX_CONCURRENT: usize = 50;
+
+    let maturity_config = maturity_config.clone();
 
     stream::iter(deps.iter().map(|unresolved_dep| {
         let cache = cache.clone();
         let unresolved_dep = unresolved_dep.clone();
+        let maturity_config = maturity_config.clone();
         async move {
-            // Handle git dependencies specially
+            // Handle git dependencies specially (no maturity check for git deps)
             if unresolved_dep.requested.starts_with("git://") {
                 let resolved_dep = Dependency {
                     name: unresolved_dep.name.clone(),
@@ -280,18 +327,22 @@ async fn fetch_deps_parallel(
                     peer_deps: vec![],
                     platform: PlatformConstraints::default(),
                     deprecated: None,
+                    maturity_fallback: None,
                 });
             }
 
-            // Fetch root metadata and resolve version
+            // Fetch root metadata and resolve version with maturity filtering
             let root_metadata = cache.get_root_metadata(&unresolved_dep).await?;
-            let (resolved_version, _) =
-                fetch_matching_version_metadata(&unresolved_dep, &root_metadata)?;
+            let resolve_result = fetch_matching_version_metadata_with_maturity(
+                &unresolved_dep,
+                &root_metadata,
+                &maturity_config,
+            )?;
 
             let resolved_dep = Dependency {
                 name: unresolved_dep.name.clone(),
                 requested: unresolved_dep.requested.clone(),
-                resolved: resolved_version.to_string(),
+                resolved: resolve_result.version.to_string(),
                 is_optional: unresolved_dep.is_optional,
                 alias: unresolved_dep.alias.clone(),
             };
@@ -342,6 +393,7 @@ async fn fetch_deps_parallel(
                 peer_deps,
                 platform: PlatformConstraints { os, cpu },
                 deprecated,
+                maturity_fallback: resolve_result.maturity_fallback,
             })
         }
     }))
@@ -445,6 +497,10 @@ pub struct ResolveOptions {
     /// Use optimal hoisting: pick the version that satisfies the most requirements
     /// instead of "first encountered wins" (npm default behavior)
     pub optimize: bool,
+    /// Configuration for package maturity age filtering
+    pub maturity: MaturityConfig,
+    /// Offline mode: only use cached packages, fail if not available
+    pub offline: bool,
 }
 
 pub async fn calculate_depends<F>(
@@ -502,7 +558,11 @@ where
     use node_semver::{Range, Version};
 
     let mut all_peer_deps: Vec<PeerDependency> = Vec::new();
-    let cache = Arc::new(MetadataCache::with_config(client.clone(), config.clone()));
+    let cache = Arc::new(MetadataCache::with_options(
+        client.clone(),
+        config.clone(),
+        options.offline,
+    ));
 
     // ========== PHASE 1: Collect all requirements ==========
     // Traverse the entire tree to collect (name, range) requirements
@@ -552,7 +612,7 @@ where
 
         // Fetch metadata in parallel
         if !deps_needing_fetch.is_empty() {
-            let results = fetch_deps_parallel(&deps_needing_fetch, &cache).await;
+            let results = fetch_deps_parallel(&deps_needing_fetch, &cache, &options.maturity).await;
             for result in results {
                 let info = result?;
                 let key = (
@@ -736,6 +796,7 @@ where
                 dependencies: deps_for_lockfile,
                 install_path: install_path.clone(),
                 deprecated: info.deprecated.clone(),
+                maturity_fallback: info.maturity_fallback.clone(),
             };
 
             installed.insert(install_key, (resolved_dep.clone(), resolved_info));
@@ -1530,6 +1591,7 @@ mod tests {
             dependencies: vec![],
             install_path: path.to_string(),
             deprecated: None,
+            maturity_fallback: None,
         }
     }
 
@@ -2077,5 +2139,136 @@ mod tests {
         // typescript not installed - but it's optional so no warning
 
         check_peer_dependencies(&peer_deps, &resolved);
+    }
+
+    // === Offline Mode Tests ===
+
+    use crate::cache::{save_root_metadata, save_version_metadata};
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_metadata_cache_offline_uses_filesystem_cache() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        // Pre-populate the cache with metadata
+        let metadata = serde_json::json!({
+            "name": "offline-test-pkg",
+            "versions": {
+                "1.0.0": {
+                    "name": "offline-test-pkg",
+                    "version": "1.0.0"
+                }
+            }
+        });
+        save_root_metadata("offline-test-pkg", &metadata, Some("etag123")).unwrap();
+
+        // Create offline cache
+        let client = reqwest::Client::new();
+        let cache = MetadataCache::with_options(client, RegistryConfig::default(), true);
+
+        // Should successfully get metadata from cache
+        let dep = Dependency {
+            name: "offline-test-pkg".to_string(),
+            requested: "^1.0.0".to_string(),
+            resolved: String::new(),
+            is_optional: false,
+            alias: None,
+        };
+
+        let result = cache.get_root_metadata(&dep).await;
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata["name"], "offline-test-pkg");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_metadata_cache_offline_fails_when_not_cached() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        // Create offline cache (no pre-populated data)
+        let client = reqwest::Client::new();
+        let cache = MetadataCache::with_options(client, RegistryConfig::default(), true);
+
+        let dep = Dependency {
+            name: "not-in-cache-pkg".to_string(),
+            requested: "^1.0.0".to_string(),
+            resolved: String::new(),
+            is_optional: false,
+            alias: None,
+        };
+
+        let result = cache.get_root_metadata(&dep).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in cache"));
+        assert!(err.contains("offline"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_metadata_cache_offline_version_from_cache() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        // Pre-populate version metadata
+        let metadata = serde_json::json!({
+            "name": "offline-ver-pkg",
+            "version": "2.0.0",
+            "dist": {
+                "tarball": "https://example.com/pkg.tgz"
+            }
+        });
+        save_version_metadata("offline-ver-pkg", "2.0.0", &metadata).unwrap();
+
+        // Create offline cache
+        let client = reqwest::Client::new();
+        let cache = MetadataCache::with_options(client, RegistryConfig::default(), true);
+
+        let dep = Dependency {
+            name: "offline-ver-pkg".to_string(),
+            requested: "^2.0.0".to_string(),
+            resolved: "2.0.0".to_string(),
+            is_optional: false,
+            alias: None,
+        };
+
+        let result = cache.get_version_metadata(&dep).await;
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata["version"], "2.0.0");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_metadata_cache_offline_version_fails_when_not_cached() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        // Create offline cache (no version metadata)
+        let client = reqwest::Client::new();
+        let cache = MetadataCache::with_options(client, RegistryConfig::default(), true);
+
+        let dep = Dependency {
+            name: "missing-ver-pkg".to_string(),
+            requested: "^1.0.0".to_string(),
+            resolved: "1.0.0".to_string(),
+            is_optional: false,
+            alias: None,
+        };
+
+        let result = cache.get_version_metadata(&dep).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in cache"));
+        assert!(err.contains("offline"));
     }
 }

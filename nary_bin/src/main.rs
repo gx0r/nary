@@ -105,6 +105,10 @@ enum Commands {
     /// Update packages to latest versions within semver range
     Update(UpdateArgs),
 
+    /// Explain why a package is installed
+    #[command(visible_alias = "explain")]
+    Why(WhyArgs),
+
     /// Output the macOS sandbox profile (for testing)
     #[cfg(target_os = "macos")]
     SandboxProfile(SandboxProfileArgs),
@@ -138,6 +142,14 @@ pub(crate) struct InstallArgs {
     /// Override the npm registry URL
     #[arg(long)]
     pub registry: Option<String>,
+
+    /// Allow installation of packages published within the maturity period
+    #[arg(long = "allow-new-packages")]
+    pub allow_new_packages: bool,
+
+    /// Use only packages from cache, never fetch from network
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Args, Debug)]
@@ -153,6 +165,14 @@ pub(crate) struct AddArgs {
     /// Save exact version (no ^ prefix)
     #[arg(short = 'E', long)]
     pub exact: bool,
+
+    /// Allow installation of packages published within the maturity period
+    #[arg(long = "allow-new-packages")]
+    pub allow_new_packages: bool,
+
+    /// Use only packages from cache, never fetch from network
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Args, Debug)]
@@ -229,6 +249,14 @@ pub(crate) struct CiArgs {
     /// Disable sandbox for lifecycle scripts (macOS only)
     #[arg(long = "no-sandbox")]
     pub no_sandbox: bool,
+
+    /// Allow installation of packages published within the maturity period
+    #[arg(long = "allow-new-packages")]
+    pub allow_new_packages: bool,
+
+    /// Use only packages from cache, never fetch from network
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Args, Debug)]
@@ -330,6 +358,21 @@ pub(crate) struct UpdateArgs {
     pub dry_run: bool,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct WhyArgs {
+    /// Package name to explain (e.g., "lodash", "lodash@4.17.21", "@babel/core")
+    #[arg(required = true)]
+    pub package: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Show packages that depend on this package (inverse query)
+    #[arg(long)]
+    pub dependents: bool,
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Args, Debug)]
 pub(crate) struct SandboxProfileArgs {
@@ -409,6 +452,7 @@ async fn run() -> Result<()> {
         Some(Commands::Audit(args)) => commands::run_audit(&args).await,
         Some(Commands::Outdated(args)) => commands::run_outdated(&args).await,
         Some(Commands::Update(args)) => commands::run_update(&args).await,
+        Some(Commands::Why(args)) => commands::run_why(&args),
         #[cfg(target_os = "macos")]
         Some(Commands::SandboxProfile(args)) => commands::run_sandbox_profile(&args),
         Some(Commands::Cache(args)) => commands::run_cache(&args),

@@ -107,6 +107,7 @@ mod tests {
             dependencies: vec![],
             install_path: path.to_string(),
             deprecated: None,
+            maturity_fallback: None,
         }
     }
 
@@ -117,6 +118,7 @@ mod tests {
             dependencies: deps,
             install_path: path.to_string(),
             deprecated: None,
+            maturity_fallback: None,
         }
     }
 

@@ -9,7 +9,8 @@ use tar::Archive;
 
 use crate::error::{
     DirCreateSnafu, GunzipSnafu, Result, TarballAbsolutePathSnafu, TarballEmptySnafu,
-    TarballEntryPathSnafu, TarballUnpackSnafu,
+    TarballEntryPathSnafu, TarballPathTraversalSnafu, TarballUnpackSnafu,
+    TarballUnsupportedEntrySnafu,
 };
 
 pub fn gunzip(tarball: Vec<u8>, tarball_url: &str) -> Result<Vec<u8>> {
@@ -50,6 +51,26 @@ pub fn unpack_archive(
 
             if entry_header.is_absolute() {
                 return TarballAbsolutePathSnafu {
+                    url: tarball_url.to_string(),
+                }
+                .fail();
+            }
+
+            // Check for path traversal (../ components)
+            if entry_header
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
+                return TarballPathTraversalSnafu {
+                    url: tarball_url.to_string(),
+                }
+                .fail();
+            }
+
+            // Only allow regular files and directories (reject symlinks, hardlinks, devices, fifos)
+            let entry_type = entry.header().entry_type();
+            if !entry_type.is_file() && !entry_type.is_dir() {
+                return TarballUnsupportedEntrySnafu {
                     url: tarball_url.to_string(),
                 }
                 .fail();
@@ -231,6 +252,160 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("absolute"));
+    }
+
+    #[test]
+    fn test_unpack_path_traversal_rejected() {
+        // Create tarball with path traversal attempt
+        let mut tar_data = Vec::new();
+
+        // Tar header is 512 bytes
+        let mut header = [0u8; 512];
+
+        // Name field (0-99): path traversal "../../../etc/passwd"
+        let name = b"package/../../../etc/passwd";
+        header[..name.len()].copy_from_slice(name);
+
+        // Mode field (100-107): "0000644\0"
+        header[100..108].copy_from_slice(b"0000644\0");
+
+        // UID (108-115): "0000000\0"
+        header[108..116].copy_from_slice(b"0000000\0");
+
+        // GID (116-123): "0000000\0"
+        header[116..124].copy_from_slice(b"0000000\0");
+
+        // Size (124-135): "00000000004\0" (4 bytes)
+        header[124..136].copy_from_slice(b"00000000004\0");
+
+        // Mtime (136-147): "00000000000\0"
+        header[136..148].copy_from_slice(b"00000000000\0");
+
+        // Checksum placeholder (148-155): 8 spaces initially
+        header[148..156].copy_from_slice(b"        ");
+
+        // Type flag (156): '0' for regular file
+        header[156] = b'0';
+
+        // Calculate checksum (sum of all bytes treating checksum field as spaces)
+        let checksum: u32 = header.iter().map(|&b| b as u32).sum();
+        let checksum_str = format!("{:06o}\0 ", checksum);
+        header[148..156].copy_from_slice(checksum_str.as_bytes());
+
+        tar_data.extend_from_slice(&header);
+
+        // File content (padded to 512 bytes)
+        let mut content_block = [0u8; 512];
+        content_block[..4].copy_from_slice(b"evil");
+        tar_data.extend_from_slice(&content_block);
+
+        // End of archive (two zero blocks)
+        tar_data.extend_from_slice(&[0u8; 1024]);
+
+        let temp = TempDir::new().unwrap();
+        let dest = temp.path().to_path_buf();
+
+        let mut archive = Archive::new(tar_data.as_slice());
+        let result = unpack_archive(&mut archive, &dest, "test://url");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("traversal"));
+    }
+
+    /// Helper to create a tarball with a specific entry type using tar crate's Builder
+    fn create_tarball_with_entry_type(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
+        use tar::{Builder, Header};
+
+        let mut builder = Builder::new(Vec::new());
+        let mut header = Header::new_gnu();
+
+        header.set_path(path).unwrap();
+        header.set_size(0);
+        header.set_entry_type(entry_type);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+
+        // For symlinks/hardlinks, set link target
+        if entry_type == tar::EntryType::Symlink || entry_type == tar::EntryType::Link {
+            header.set_link_name("/etc/passwd").unwrap();
+        }
+
+        header.set_cksum();
+        builder.append(&header, &[] as &[u8]).unwrap();
+
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn test_unpack_symlink_rejected() {
+        let tar_data = create_tarball_with_entry_type("package/evil-link", tar::EntryType::Symlink);
+        let temp = TempDir::new().unwrap();
+        let mut archive = Archive::new(tar_data.as_slice());
+        let result = unpack_archive(&mut archive, temp.path(), "test://url");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported entry type"));
+    }
+
+    #[test]
+    fn test_unpack_hardlink_rejected() {
+        let tar_data =
+            create_tarball_with_entry_type("package/evil-hardlink", tar::EntryType::Link);
+        let temp = TempDir::new().unwrap();
+        let mut archive = Archive::new(tar_data.as_slice());
+        let result = unpack_archive(&mut archive, temp.path(), "test://url");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported entry type"));
+    }
+
+    #[test]
+    fn test_unpack_char_device_rejected() {
+        let tar_data = create_tarball_with_entry_type("package/dev-null", tar::EntryType::Char);
+        let temp = TempDir::new().unwrap();
+        let mut archive = Archive::new(tar_data.as_slice());
+        let result = unpack_archive(&mut archive, temp.path(), "test://url");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported entry type"));
+    }
+
+    #[test]
+    fn test_unpack_block_device_rejected() {
+        let tar_data = create_tarball_with_entry_type("package/sda", tar::EntryType::Block);
+        let temp = TempDir::new().unwrap();
+        let mut archive = Archive::new(tar_data.as_slice());
+        let result = unpack_archive(&mut archive, temp.path(), "test://url");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported entry type"));
+    }
+
+    #[test]
+    fn test_unpack_fifo_rejected() {
+        let tar_data = create_tarball_with_entry_type("package/my-fifo", tar::EntryType::Fifo);
+        let temp = TempDir::new().unwrap();
+        let mut archive = Archive::new(tar_data.as_slice());
+        let result = unpack_archive(&mut archive, temp.path(), "test://url");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported entry type"));
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub use integrity::{compute_sha512_integrity, verify_integrity};
 
 mod cache;
 pub use crate::cache::{
-    cache_tarball, clear_cache, dir_size, get_cache_dir, load_root_metadata,
+    cache_tarball, clear_cache, dir_size, get_cache_dir, get_cached_tarball, load_root_metadata,
     load_root_metadata_async, load_version_metadata, load_version_metadata_async,
     save_root_metadata, save_root_metadata_async, save_version_metadata,
     save_version_metadata_async, CachedMetadata, PATH_SEGMENT_ENCODE_SET,
@@ -63,10 +63,23 @@ pub use audit::{
     parse_audit_response, Advisory, AuditResponse, AuditResult, AuditSummary,
 };
 
+pub mod maturity;
+pub use maturity::{
+    check_version_maturity, get_version_publish_time, MaturityCheckResult, MaturityConfig,
+    MaturityFallbackInfo, DEFAULT_MATURITY_MINUTES,
+};
+
+pub mod why;
+pub use why::{
+    find_dependency_paths, find_dependency_paths_with_options, find_dependents,
+    find_dependents_with_options, format_why_json, format_why_text, RootDependency, WhyOptions,
+    WhyResult,
+};
+
 use crate::error::{
     DirCreateSnafu, GitCheckoutSnafu, GitCloneSnafu, HttpClientBuildSnafu, HttpRequestSnafu,
     HttpResponseSnafu, JsonParseSnafu, MissingFieldSnafu, NoMatchingVersionSnafu,
-    SemverRangeParseSnafu, SymlinkSnafu,
+    NoMatureVersionSnafu, SemverRangeParseSnafu, SymlinkSnafu,
 };
 
 /// Create a shared HTTP client with connection pooling
@@ -194,12 +207,14 @@ fn normalize_git_clone_url(url: &str) -> String {
 /// Install a dependency using a pre-resolved tarball URL and optional integrity hash
 /// The install_path should be the full path like "node_modules/lodash" or
 /// "node_modules/express/node_modules/lodash" for nested dependencies
+/// If offline is true, only use cached tarballs - fail if not in cache
 pub async fn install_dep_with_tarball_url(
     client: &Client,
     dep: &Dependency,
     install_path: &str,
     tarball_url: Option<&str>,
     integrity: Option<&str>,
+    offline: bool,
 ) -> Result<()> {
     let package_path = Path::new(install_path);
 
@@ -223,6 +238,14 @@ pub async fn install_dep_with_tarball_url(
         // An empty directory from a failed clone should not be considered installed
         if package_path.join("package.json").exists() {
             return Ok(());
+        }
+
+        // In offline mode, git dependencies that aren't already installed fail
+        if offline {
+            return Err(Error::OfflineTarballNotCached {
+                package: dep.name.clone(),
+                version: "git".to_string(),
+            });
         }
 
         // Remove empty directory from previous failed install (safe to ignore errors)
@@ -359,49 +382,56 @@ pub async fn install_dep_with_tarball_url(
         return Ok(());
     }
 
-    // Use provided tarball URL, or fall back to fetching metadata
-    let tarball_url = match tarball_url {
-        Some(url) => url.to_string(),
-        None => {
-            let metadata = fetch_package_root_metadata(client, dep).await?;
-            let versions = &metadata["versions"].as_object().ok_or_else(|| {
-                MissingFieldSnafu {
-                    package: dep.name.clone(),
-                    field: "versions",
-                }
-                .build()
-            })?;
-            let version_metadata = versions.get(&dep.resolved).ok_or_else(|| {
-                MissingFieldSnafu {
-                    package: dep.name.clone(),
-                    field: "resolved version",
-                }
-                .build()
-            })?;
-            version_metadata["dist"]["tarball"]
-                .as_str()
-                .ok_or_else(|| {
+    // In offline mode, use only cached tarballs
+    let (tarball_bytes, tarball_source) = if offline {
+        let bytes = get_cached_tarball(&dep.name, &dep.resolved).await?;
+        // Use a descriptive source for error messages in offline mode
+        let source = format!("cache:{}@{}", dep.name, dep.resolved);
+        (bytes, source)
+    } else {
+        // Use provided tarball URL, or fall back to fetching metadata
+        let url = match tarball_url {
+            Some(url) => url.to_string(),
+            None => {
+                let metadata = fetch_package_root_metadata(client, dep).await?;
+                let versions = &metadata["versions"].as_object().ok_or_else(|| {
                     MissingFieldSnafu {
                         package: dep.name.clone(),
-                        field: "dist.tarball",
+                        field: "versions",
                     }
                     .build()
-                })?
-                .to_string()
-        }
-    };
+                })?;
+                let version_metadata = versions.get(&dep.resolved).ok_or_else(|| {
+                    MissingFieldSnafu {
+                        package: dep.name.clone(),
+                        field: "resolved version",
+                    }
+                    .build()
+                })?;
+                version_metadata["dist"]["tarball"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        MissingFieldSnafu {
+                            package: dep.name.clone(),
+                            field: "dist.tarball",
+                        }
+                        .build()
+                    })?
+                    .to_string()
+            }
+        };
 
-    let tarball_bytes =
-        cache_tarball(client, &dep.name, &dep.resolved, &tarball_url, integrity).await?;
+        let bytes = cache_tarball(client, &dep.name, &dep.resolved, &url, integrity).await?;
+        (bytes, url)
+    };
 
     // Move blocking I/O (gunzip + unpack) to a blocking thread pool
     // Note: async-tar doesn't handle PAX extended headers well, so we use sync tar
     let package_path_owned = package_path.to_path_buf();
-    let tarball_url_owned = tarball_url.clone();
     tokio::task::spawn_blocking(move || {
-        let tarball = gunzip(tarball_bytes, &tarball_url_owned)?;
+        let tarball = gunzip(tarball_bytes, &tarball_source)?;
         let mut archive = Archive::new(tarball.as_slice());
-        unpack_archive(&mut archive, &package_path_owned, &tarball_url_owned)
+        unpack_archive(&mut archive, &package_path_owned, &tarball_source)
     })
     .await
     .map_err(|e| Error::ExtractionTaskPanic {
@@ -617,4 +647,308 @@ pub fn fetch_matching_version_metadata<'a>(
         }
         .build()
     })
+}
+
+/// Result from version resolution with maturity checking
+#[derive(Clone, Debug)]
+pub struct VersionResolveResult<'a> {
+    /// The selected version string
+    pub version: &'a String,
+    /// The metadata for the selected version
+    pub metadata: &'a Value,
+    /// If a fallback was used due to maturity, contains info about the skipped version
+    pub maturity_fallback: Option<MaturityFallbackInfo>,
+}
+
+/// Fetch matching version metadata with maturity filtering.
+///
+/// This function extends `fetch_matching_version_metadata` to also filter by package age.
+/// If the newest matching version is too new (published within the maturity period),
+/// it will fall back to the next oldest version that meets the age requirement.
+pub fn fetch_matching_version_metadata_with_maturity<'a>(
+    dep: &Dependency,
+    root_metadata: &'a serde_json::Value,
+    maturity_config: &MaturityConfig,
+) -> Result<VersionResolveResult<'a>> {
+    let required_version: Range = dep.requested.parse().map_err(|_| {
+        SemverRangeParseSnafu {
+            package: dep.name.clone(),
+            range: dep.requested.clone(),
+        }
+        .build()
+    })?;
+
+    let versions = &root_metadata["versions"].as_object().ok_or_else(|| {
+        MissingFieldSnafu {
+            package: dep.name.clone(),
+            field: "versions",
+        }
+        .build()
+    })?;
+
+    // Collect all versions matching the semver range
+    let mut matching: Vec<(&String, &Value, Version)> = Vec::new();
+    for (ver_str, ver_data) in versions.iter() {
+        // Skip versions that don't parse as valid semver (e.g., canary/nightly builds)
+        let Ok(parsed) = ver_str.parse::<Version>() else {
+            continue;
+        };
+        if parsed.satisfies(&required_version) {
+            matching.push((ver_str, ver_data, parsed));
+        }
+    }
+
+    // Sort by semver descending (highest first) to match npm behavior
+    matching.sort_by(|a, b| b.2.cmp(&a.2));
+
+    if matching.is_empty() {
+        return Err(NoMatchingVersionSnafu {
+            package: dep.name.clone(),
+            requested: dep.requested.clone(),
+        }
+        .build());
+    }
+
+    // If maturity checking is disabled for this package, return the highest version
+    if !maturity_config.should_check(&dep.name) {
+        let (version, metadata, _) = matching[0];
+        return Ok(VersionResolveResult {
+            version,
+            metadata,
+            maturity_fallback: None,
+        });
+    }
+
+    // Find the first version that passes maturity check
+    let mut skipped_fallback: Option<MaturityFallbackInfo> = None;
+
+    for (ver_str, ver_data, _) in &matching {
+        match check_version_maturity(root_metadata, ver_str, maturity_config) {
+            MaturityCheckResult::Mature | MaturityCheckResult::NoTimeData => {
+                return Ok(VersionResolveResult {
+                    version: ver_str,
+                    metadata: ver_data,
+                    maturity_fallback: skipped_fallback,
+                });
+            }
+            MaturityCheckResult::TooNew {
+                published_at,
+                age_minutes,
+            } => {
+                // Record the first skipped version for user feedback
+                if skipped_fallback.is_none() {
+                    skipped_fallback = Some(MaturityFallbackInfo {
+                        skipped_version: (*ver_str).clone(),
+                        skipped_published_at: published_at,
+                        skipped_age_minutes: age_minutes,
+                        required_age_minutes: maturity_config.minimum_age_minutes,
+                    });
+                }
+            }
+        }
+    }
+
+    // All matching versions are too new
+    let fallback = skipped_fallback.unwrap();
+    Err(NoMatureVersionSnafu {
+        package: dep.name.clone(),
+        requested: dep.requested.clone(),
+        newest_version: fallback.skipped_version,
+        age_minutes: fallback.skipped_age_minutes,
+        required_minutes: fallback.required_age_minutes,
+    }
+    .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+
+    fn make_dep(name: &str, requested: &str) -> Dependency {
+        Dependency {
+            name: name.to_string(),
+            requested: requested.to_string(),
+            resolved: String::new(),
+            is_optional: false,
+            alias: None,
+        }
+    }
+
+    #[test]
+    fn test_maturity_disabled_returns_highest_version() {
+        let dep = make_dep("lodash", "^4.0.0");
+        let metadata = json!({
+            "versions": {
+                "4.17.20": {},
+                "4.17.21": {},
+                "4.16.0": {}
+            }
+        });
+
+        let config = MaturityConfig::disabled();
+        let result = fetch_matching_version_metadata_with_maturity(&dep, &metadata, &config);
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.version, "4.17.21");
+        assert!(result.maturity_fallback.is_none());
+    }
+
+    #[test]
+    fn test_maturity_falls_back_to_older_version() {
+        let dep = make_dep("lodash", "^4.0.0");
+
+        // 4.17.21 published 1 hour ago (too new)
+        // 4.17.20 published 1 week ago (mature)
+        let recent = Utc::now() - Duration::hours(1);
+        let old = Utc::now() - Duration::days(7);
+
+        let metadata = json!({
+            "versions": {
+                "4.17.20": {},
+                "4.17.21": {},
+                "4.16.0": {}
+            },
+            "time": {
+                "4.17.21": recent.to_rfc3339(),
+                "4.17.20": old.to_rfc3339(),
+                "4.16.0": old.to_rfc3339()
+            }
+        });
+
+        let config = MaturityConfig {
+            minimum_age_minutes: 4320, // 3 days
+            excluded_packages: vec![],
+            allow_new_packages: false,
+        };
+
+        let result = fetch_matching_version_metadata_with_maturity(&dep, &metadata, &config);
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.version, "4.17.20"); // Fell back to older version
+        assert!(result.maturity_fallback.is_some());
+
+        let fallback = result.maturity_fallback.unwrap();
+        assert_eq!(fallback.skipped_version, "4.17.21");
+    }
+
+    #[test]
+    fn test_maturity_excluded_package_gets_newest() {
+        let dep = make_dep("lodash", "^4.0.0");
+
+        let recent = Utc::now() - Duration::hours(1);
+
+        let metadata = json!({
+            "versions": {
+                "4.17.20": {},
+                "4.17.21": {}
+            },
+            "time": {
+                "4.17.21": recent.to_rfc3339(),
+                "4.17.20": recent.to_rfc3339()
+            }
+        });
+
+        let config = MaturityConfig {
+            minimum_age_minutes: 4320,
+            excluded_packages: vec!["lodash".to_string()], // Excluded!
+            allow_new_packages: false,
+        };
+
+        let result = fetch_matching_version_metadata_with_maturity(&dep, &metadata, &config);
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.version, "4.17.21"); // Gets newest despite being new
+        assert!(result.maturity_fallback.is_none());
+    }
+
+    #[test]
+    fn test_maturity_all_versions_too_new_returns_error() {
+        let dep = make_dep("new-package", "^1.0.0");
+
+        let recent = Utc::now() - Duration::hours(1);
+
+        let metadata = json!({
+            "versions": {
+                "1.0.0": {},
+                "1.0.1": {}
+            },
+            "time": {
+                "1.0.0": recent.to_rfc3339(),
+                "1.0.1": recent.to_rfc3339()
+            }
+        });
+
+        let config = MaturityConfig {
+            minimum_age_minutes: 4320, // 3 days
+            excluded_packages: vec![],
+            allow_new_packages: false,
+        };
+
+        let result = fetch_matching_version_metadata_with_maturity(&dep, &metadata, &config);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("No mature version"));
+    }
+
+    #[test]
+    fn test_maturity_no_time_data_treats_as_mature() {
+        let dep = make_dep("old-package", "^1.0.0");
+
+        // No time field at all
+        let metadata = json!({
+            "versions": {
+                "1.0.0": {},
+                "1.0.1": {}
+            }
+        });
+
+        let config = MaturityConfig {
+            minimum_age_minutes: 4320,
+            excluded_packages: vec![],
+            allow_new_packages: false,
+        };
+
+        let result = fetch_matching_version_metadata_with_maturity(&dep, &metadata, &config);
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.version, "1.0.1"); // Gets newest (no time = treated as mature)
+        assert!(result.maturity_fallback.is_none());
+    }
+
+    #[test]
+    fn test_maturity_scoped_package_exclusion() {
+        let dep = make_dep("@types/node", "^18.0.0");
+
+        let recent = Utc::now() - Duration::hours(1);
+
+        let metadata = json!({
+            "versions": {
+                "18.0.0": {},
+                "18.19.0": {}
+            },
+            "time": {
+                "18.0.0": recent.to_rfc3339(),
+                "18.19.0": recent.to_rfc3339()
+            }
+        });
+
+        let config = MaturityConfig {
+            minimum_age_minutes: 4320,
+            excluded_packages: vec!["@types".to_string()], // Exclude @types/* packages
+            allow_new_packages: false,
+        };
+
+        let result = fetch_matching_version_metadata_with_maturity(&dep, &metadata, &config);
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.version, "18.19.0"); // Gets newest (excluded by prefix)
+    }
 }

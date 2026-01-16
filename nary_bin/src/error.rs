@@ -45,6 +45,11 @@ pub enum Error {
     #[snafu(display("Could not find version for {package}"))]
     NoVersion { package: String },
 
+    #[snafu(display(
+        "Cannot resolve latest version for {package} in offline mode (not in cache)"
+    ))]
+    OfflineNoVersion { package: String },
+
     #[snafu(display("Script '{script}' not found in package.json"))]
     ScriptNotFound { script: String },
 

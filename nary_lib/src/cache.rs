@@ -14,7 +14,8 @@ use std::{
 
 use crate::error::{
     CacheDirSnafu, DirCreateSnafu, FileReadSnafu, FileWriteSnafu, HttpRequestSnafu,
-    HttpResponseSnafu, IntegrityMismatchSnafu, InvalidIntegritySnafu, JsonSerializeSnafu, Result,
+    HttpResponseSnafu, IntegrityMismatchSnafu, InvalidIntegritySnafu, JsonSerializeSnafu,
+    OfflineTarballNotCachedSnafu, Result,
 };
 
 /// Cached metadata with optional ETag for conditional requests
@@ -159,6 +160,29 @@ pub async fn cache_tarball(
         .context(FileWriteSnafu { path: path.clone() })?;
 
     Ok(tarball_res)
+}
+
+/// Get a cached tarball (offline mode - fails if not in cache)
+pub async fn get_cached_tarball(key: &str, version: &str) -> Result<Vec<u8>> {
+    let mut path = get_cache_dir()?;
+    path.push(utf8_percent_encode(key, PATH_SEGMENT_ENCODE_SET).to_string());
+    path.push(version);
+    path.push("package.tgz");
+
+    if let Ok(mut cache_file) = tokio::fs::File::open(&path).await {
+        let mut tarball_res = Vec::new();
+        cache_file
+            .read_to_end(&mut tarball_res)
+            .await
+            .context(FileReadSnafu { path: path.clone() })?;
+        return Ok(tarball_res);
+    }
+
+    OfflineTarballNotCachedSnafu {
+        package: key.to_string(),
+        version: version.to_string(),
+    }
+    .fail()
 }
 
 /// Get the cache path for a package (creating directories if needed)
@@ -620,5 +644,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second, tarball_content);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_cached_tarball_returns_cached() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        let server = MockServer::start().await;
+        let tarball_content = b"offline-test-content";
+
+        Mock::given(method("GET"))
+            .and(path("/pkg/-/pkg-1.0.0.tgz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(tarball_content.to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let url = format!("{}/pkg/-/pkg-1.0.0.tgz", server.uri());
+
+        // First, cache the tarball
+        cache_tarball(&client, "offline-pkg", "1.0.0", &url, None)
+            .await
+            .unwrap();
+
+        // Now get it in offline mode (no network access needed)
+        let result = get_cached_tarball("offline-pkg", "1.0.0").await.unwrap();
+        assert_eq!(result, tarball_content);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_cached_tarball_fails_when_not_cached() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        // Try to get a tarball that was never cached
+        let result = get_cached_tarball("nonexistent-pkg", "1.0.0").await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in cache"));
+        assert!(err.contains("offline"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_cached_tarball_scoped_package() {
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join(".nary_cache")).unwrap();
+
+        let server = MockServer::start().await;
+        let tarball_content = b"scoped-offline-content";
+
+        Mock::given(method("GET"))
+            .and(path("/@scope/pkg/-/pkg-2.0.0.tgz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(tarball_content.to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let url = format!("{}/@scope/pkg/-/pkg-2.0.0.tgz", server.uri());
+
+        // Cache the scoped package
+        cache_tarball(&client, "@scope/pkg", "2.0.0", &url, None)
+            .await
+            .unwrap();
+
+        // Get it offline
+        let result = get_cached_tarball("@scope/pkg", "2.0.0").await.unwrap();
+        assert_eq!(result, tarball_content);
     }
 }

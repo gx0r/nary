@@ -86,6 +86,12 @@ pub enum Error {
     #[snafu(display("Could not determine cache directory"))]
     CacheDir,
 
+    #[snafu(display("Package {package}@{version} not found in cache (offline mode)"))]
+    OfflineTarballNotCached { package: String, version: String },
+
+    #[snafu(display("Metadata for {package} not found in cache (offline mode)"))]
+    OfflineMetadataNotCached { package: String },
+
     // === Archive Errors ===
     #[snafu(display("Failed to decompress {url}"))]
     Gunzip {
@@ -112,6 +118,14 @@ pub enum Error {
     #[snafu(display("Tarball {url} contains absolute path (security risk)"))]
     TarballAbsolutePath { url: String },
 
+    #[snafu(display("Tarball {url} contains path traversal (security risk)"))]
+    TarballPathTraversal { url: String },
+
+    #[snafu(display(
+        "Tarball {url} contains unsupported entry type (only files and directories allowed)"
+    ))]
+    TarballUnsupportedEntry { url: String },
+
     #[snafu(display("Failed to unpack entry {index} from {url}"))]
     TarballUnpack {
         url: String,
@@ -123,6 +137,17 @@ pub enum Error {
     // === Version Resolution ===
     #[snafu(display("No matching version for {package} {requested}"))]
     NoMatchingVersion { package: String, requested: String },
+
+    #[snafu(display(
+        "No mature version for {package} {requested}: newest {newest_version} is only {age_minutes} minutes old (requires {required_minutes})"
+    ))]
+    NoMatureVersion {
+        package: String,
+        requested: String,
+        newest_version: String,
+        age_minutes: u64,
+        required_minutes: u64,
+    },
 
     #[snafu(display("Cyclic dependency: {package}"))]
     CyclicDependency { package: String },

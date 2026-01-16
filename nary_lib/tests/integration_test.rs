@@ -1,5 +1,8 @@
 use nary_lib::deps::*;
-use nary_lib::{calculate_depends_with_config, create_client, NpmrcConfig, RegistryConfig};
+use nary_lib::{
+    calculate_depends_with_config, calculate_depends_with_options, create_client, MaturityConfig,
+    NpmrcConfig, RegistryConfig, ResolveOptions,
+};
 
 use indoc::indoc;
 use std::io::Cursor;
@@ -543,5 +546,299 @@ async fn it_handles_401_unauthorized() -> Result<(), Box<dyn std::error::Error>>
 
     // Should return an error for 401
     assert!(result.is_err());
+    Ok(())
+}
+
+/// Mount a mock response with time field for maturity testing
+async fn mount_package_with_time(server: &MockServer, name: &str, body: &str) {
+    // Mount root metadata endpoint
+    Mock::given(method("GET"))
+        .and(path(format!("/{}", name)))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .mount(server)
+        .await;
+
+    // Parse the fixture to mount version-specific endpoints
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(versions) = json.get("versions").and_then(|v| v.as_object()) {
+            for (version, version_data) in versions {
+                let version_body = version_data.to_string();
+                Mock::given(method("GET"))
+                    .and(path(format!("/{}/{}", name, version)))
+                    .respond_with(ResponseTemplate::new(200).set_body_string(version_body))
+                    .mount(server)
+                    .await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn it_applies_maturity_fallback_to_older_version() -> Result<()> {
+    use chrono::{Duration, Utc};
+
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // Create mock package with time data:
+    // - 1.0.1 published 1 hour ago (too new)
+    // - 1.0.0 published 1 week ago (mature)
+    let recent = Utc::now() - Duration::hours(1);
+    let old = Utc::now() - Duration::days(7);
+
+    let test_pkg = format!(
+        r#"{{
+            "name": "test-pkg",
+            "versions": {{
+                "1.0.0": {{
+                    "name": "test-pkg",
+                    "version": "1.0.0",
+                    "dist": {{
+                        "tarball": "https://registry.npmjs.org/test-pkg/-/test-pkg-1.0.0.tgz",
+                        "integrity": "sha512-old"
+                    }}
+                }},
+                "1.0.1": {{
+                    "name": "test-pkg",
+                    "version": "1.0.1",
+                    "dist": {{
+                        "tarball": "https://registry.npmjs.org/test-pkg/-/test-pkg-1.0.1.tgz",
+                        "integrity": "sha512-new"
+                    }}
+                }}
+            }},
+            "time": {{
+                "1.0.0": "{}",
+                "1.0.1": "{}"
+            }}
+        }}"#,
+        old.to_rfc3339(),
+        recent.to_rfc3339()
+    );
+
+    mount_package_with_time(&mock_server, "test-pkg", &test_pkg).await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "test-pkg".to_string(),
+        requested: "^1.0.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    // With maturity enabled (3 day requirement)
+    let maturity_config = MaturityConfig {
+        minimum_age_minutes: 4320, // 3 days
+        excluded_packages: vec![],
+        allow_new_packages: false,
+    };
+    let options = ResolveOptions {
+        optimize: false,
+        maturity: maturity_config,
+        offline: false,
+    };
+
+    let calculated =
+        calculate_depends_with_options(&client, &root, &dependencies, |_, _| {}, &config, &options)
+            .await?;
+
+    // Should fall back to 1.0.0 since 1.0.1 is too new
+    let pkg = calculated
+        .keys()
+        .find(|d| d.name == "test-pkg")
+        .expect("test-pkg should be resolved");
+    assert_eq!(pkg.resolved, "1.0.0");
+
+    // Should have fallback info
+    let info = calculated.get(pkg).unwrap();
+    assert!(info.maturity_fallback.is_some());
+    let fallback = info.maturity_fallback.as_ref().unwrap();
+    assert_eq!(fallback.skipped_version, "1.0.1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_allows_new_packages_when_flag_set() -> Result<()> {
+    use chrono::{Duration, Utc};
+
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // Both versions published recently
+    let recent = Utc::now() - Duration::hours(1);
+
+    let test_pkg = format!(
+        r#"{{
+            "name": "new-pkg",
+            "versions": {{
+                "1.0.0": {{
+                    "name": "new-pkg",
+                    "version": "1.0.0",
+                    "dist": {{
+                        "tarball": "https://registry.npmjs.org/new-pkg/-/new-pkg-1.0.0.tgz",
+                        "integrity": "sha512-abc"
+                    }}
+                }},
+                "1.0.1": {{
+                    "name": "new-pkg",
+                    "version": "1.0.1",
+                    "dist": {{
+                        "tarball": "https://registry.npmjs.org/new-pkg/-/new-pkg-1.0.1.tgz",
+                        "integrity": "sha512-def"
+                    }}
+                }}
+            }},
+            "time": {{
+                "1.0.0": "{}",
+                "1.0.1": "{}"
+            }}
+        }}"#,
+        recent.to_rfc3339(),
+        recent.to_rfc3339()
+    );
+
+    mount_package_with_time(&mock_server, "new-pkg", &test_pkg).await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "new-pkg".to_string(),
+        requested: "^1.0.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    // With allow_new_packages = true, should get newest
+    let maturity_config = MaturityConfig {
+        minimum_age_minutes: 4320,
+        excluded_packages: vec![],
+        allow_new_packages: true, // Bypass!
+    };
+    let options = ResolveOptions {
+        optimize: false,
+        maturity: maturity_config,
+        offline: false,
+    };
+
+    let calculated =
+        calculate_depends_with_options(&client, &root, &dependencies, |_, _| {}, &config, &options)
+            .await?;
+
+    // Should get newest version despite being new
+    let pkg = calculated
+        .keys()
+        .find(|d| d.name == "new-pkg")
+        .expect("new-pkg should be resolved");
+    assert_eq!(pkg.resolved, "1.0.1");
+
+    // No fallback since we allowed new packages
+    let info = calculated.get(pkg).unwrap();
+    assert!(info.maturity_fallback.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn it_errors_when_all_versions_too_new() -> Result<(), Box<dyn std::error::Error>> {
+    use chrono::{Duration, Utc};
+
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // All versions published recently
+    let recent = Utc::now() - Duration::hours(1);
+
+    let test_pkg = format!(
+        r#"{{
+            "name": "brand-new-pkg",
+            "versions": {{
+                "1.0.0": {{
+                    "name": "brand-new-pkg",
+                    "version": "1.0.0",
+                    "dist": {{
+                        "tarball": "https://registry.npmjs.org/brand-new-pkg/-/brand-new-pkg-1.0.0.tgz",
+                        "integrity": "sha512-xyz"
+                    }}
+                }}
+            }},
+            "time": {{
+                "1.0.0": "{}"
+            }}
+        }}"#,
+        recent.to_rfc3339()
+    );
+
+    mount_package_with_time(&mock_server, "brand-new-pkg", &test_pkg).await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "brand-new-pkg".to_string(),
+        requested: "^1.0.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    let maturity_config = MaturityConfig {
+        minimum_age_minutes: 4320, // 3 days
+        excluded_packages: vec![],
+        allow_new_packages: false,
+    };
+    let options = ResolveOptions {
+        optimize: false,
+        maturity: maturity_config,
+        offline: false,
+    };
+
+    let result =
+        calculate_depends_with_options(&client, &root, &dependencies, |_, _| {}, &config, &options)
+            .await;
+
+    // Should error because all versions are too new
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("No mature version"));
+
     Ok(())
 }
