@@ -10,7 +10,8 @@ pub enum VersionError {
     #[snafu(display("Failed to parse version '{}': {}", version, source))]
     ParseVersion {
         version: String,
-        source: node_semver::SemverError,
+        #[snafu(source(from(node_semver::SemverError, Box::new)))]
+        source: Box<node_semver::SemverError>,
         backtrace: snafu::Backtrace,
     },
     #[snafu(display(

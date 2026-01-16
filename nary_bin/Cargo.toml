@@ -10,7 +10,7 @@ nary_lib = { path = "../nary_lib" }
 snafu.workspace = true
 reqwest.workspace = true
 atty = "0.2"
-bytesize = "1"
+bytesize = "2"
 clap = { version = "4", features = ["derive"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
 serde_json.workspace = true
@@ -23,6 +23,7 @@ terminal_size = "0.4"
 dashmap.workspace = true
 pathdiff.workspace = true
 node-semver.workspace = true
+tabled = "0.20"
 
 [[bin]]
 name = "nary"

@@ -173,6 +173,24 @@ pub fn link_package_bins(_node_modules: &Path, _package_name: &str) -> Result<()
     Ok(())
 }
 
+/// Check if URL is a git dependency URL
+fn is_git_url(url: &str) -> bool {
+    url.starts_with("git://") || url.starts_with("git+")
+}
+
+/// Normalize git URL for cloning - strip git+ prefix and upgrade git:// to https://
+fn normalize_git_clone_url(url: &str) -> String {
+    // Strip git+ prefix (npm lockfile convention)
+    let url = url.strip_prefix("git+").unwrap_or(url);
+
+    // Upgrade git:// to https:// (git:// was disabled by GitHub in 2022)
+    if url.starts_with("git://") {
+        return url.replacen("git://", "https://", 1);
+    }
+
+    url.to_string()
+}
+
 /// Install a dependency using a pre-resolved tarball URL and optional integrity hash
 /// The install_path should be the full path like "node_modules/lodash" or
 /// "node_modules/express/node_modules/lodash" for nested dependencies
@@ -185,9 +203,21 @@ pub async fn install_dep_with_tarball_url(
 ) -> Result<()> {
     let package_path = Path::new(install_path);
 
-    // Handle git dependencies
-    if dep.requested.starts_with("git://") {
-        use git2::{build::RepoBuilder, FetchOptions, Repository};
+    // Handle git dependencies - check both dep.requested and tarball_url (from lockfile's "resolved" field)
+    let git_url_raw = if is_git_url(&dep.requested) {
+        Some(dep.requested.clone())
+    } else if let Some(url) = tarball_url {
+        if is_git_url(url) {
+            Some(url.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(git_url_raw) = git_url_raw {
+        use std::process::Command;
 
         // Skip if already installed (check for package.json, not just directory)
         // An empty directory from a failed clone should not be considered installed
@@ -207,94 +237,117 @@ pub async fn install_dep_with_tarball_url(
             })?;
         }
 
-        // Check if a ref looks like a commit hash (40 hex chars)
-        fn is_commit_hash(s: &str) -> bool {
-            s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+        // Split URL and ref (e.g., "git+ssh://github.com/user/repo.git#commit")
+        let (repo_part, git_ref) = match git_url_raw.rfind('#') {
+            Some(pos) => (&git_url_raw[..pos], Some(&git_url_raw[pos + 1..])),
+            None => (git_url_raw.as_str(), None),
+        };
+
+        // Normalize the URL for cloning (strip git+ prefix, upgrade git:// to https://)
+        let clone_url = normalize_git_clone_url(repo_part);
+
+        // Check if ref is a commit hash (40 hex chars) - needs full clone
+        let is_commit =
+            git_ref.is_some_and(|r| r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Clone with system git - more robust than git2 crate
+        // Handles SSH keys/agents/config/insteadOf rules automatically
+        let clone_result = if is_commit {
+            // Full clone needed for commit hashes
+            Command::new("git")
+                .args(["clone", "--quiet", &clone_url])
+                .arg(package_path)
+                .status()
+        } else {
+            // Shallow clone for branches/tags or no ref
+            Command::new("git")
+                .args(["clone", "--depth=1", "--quiet", &clone_url])
+                .arg(package_path)
+                .status()
+        };
+
+        let status = clone_result.context(GitCloneSnafu {
+            url: clone_url.clone(),
+        })?;
+
+        if !status.success() {
+            return Err(std::io::Error::other(format!(
+                "git clone failed with exit code {:?}",
+                status.code()
+            )))
+            .context(GitCloneSnafu {
+                url: clone_url.clone(),
+            });
         }
 
-        if let Some(x) = dep.requested.rfind('#') {
-            let (repo, hash) = dep.requested.split_at(x);
-            let repo_url = repo.replacen("git://", "https://", 1);
-            let git_ref = &hash[1..]; // Skip the '#'
+        // Checkout specific ref if provided
+        if let Some(ref_str) = git_ref {
+            if is_commit {
+                // For commits, just checkout directly
+                let checkout_status = Command::new("git")
+                    .args(["-C"])
+                    .arg(package_path)
+                    .args(["checkout", "--quiet", ref_str])
+                    .status()
+                    .context(GitCheckoutSnafu {
+                        url: clone_url.clone(),
+                        git_ref: ref_str.to_string(),
+                    })?;
 
-            if is_commit_hash(git_ref) {
-                // Commit hash: need full clone to ensure commit is available
-                let repo_cloned =
-                    Repository::clone(&repo_url, package_path).context(GitCloneSnafu {
-                        url: repo_url.to_string(),
-                    })?;
-                let obj = repo_cloned
-                    .revparse_single(git_ref)
+                if !checkout_status.success() {
+                    return Err(std::io::Error::other(format!(
+                        "git checkout failed with exit code {:?}",
+                        checkout_status.code()
+                    )))
                     .context(GitCheckoutSnafu {
-                        url: repo.to_string(),
-                        git_ref: git_ref.to_string(),
-                    })?;
-                repo_cloned
-                    .set_head_detached(obj.id())
-                    .context(GitCheckoutSnafu {
-                        url: repo.to_string(),
-                        git_ref: git_ref.to_string(),
-                    })?;
-                repo_cloned.checkout_head(None).context(GitCheckoutSnafu {
-                    url: repo.to_string(),
-                    git_ref: git_ref.to_string(),
-                })?;
+                        url: clone_url.clone(),
+                        git_ref: ref_str.to_string(),
+                    });
+                }
             } else {
-                // Tag or branch: shallow clone, then fetch specific ref, then checkout
-                let mut fetch_opts = FetchOptions::new();
-                fetch_opts.depth(1);
-                // Clone default branch first (shallow)
-                let repo_cloned = RepoBuilder::new()
-                    .fetch_options(fetch_opts)
-                    .clone(&repo_url, package_path)
-                    .context(GitCloneSnafu {
-                        url: repo_url.to_string(),
-                    })?;
-                // Fetch the specific tag/branch
-                let mut remote = repo_cloned.find_remote("origin").context(GitCloneSnafu {
-                    url: repo_url.to_string(),
-                })?;
-                let mut fetch_opts2 = FetchOptions::new();
-                fetch_opts2.depth(1);
-                let refspec = format!("refs/tags/{0}:refs/tags/{0}", git_ref);
-                remote
-                    .fetch(&[&refspec], Some(&mut fetch_opts2), None)
-                    .or_else(|_| {
-                        // Try as branch if tag fetch fails
-                        let refspec = format!("refs/heads/{0}:refs/remotes/origin/{0}", git_ref);
-                        remote.fetch(&[&refspec], Some(&mut fetch_opts2), None)
-                    })
+                // For shallow clones, fetch the specific ref first
+                let fetch_status = Command::new("git")
+                    .args(["-C"])
+                    .arg(package_path)
+                    .args(["fetch", "--depth=1", "--quiet", "origin", ref_str])
+                    .status()
                     .context(GitCheckoutSnafu {
-                        url: repo.to_string(),
-                        git_ref: git_ref.to_string(),
+                        url: clone_url.clone(),
+                        git_ref: ref_str.to_string(),
                     })?;
-                // Checkout the ref
-                let obj = repo_cloned
-                    .revparse_single(git_ref)
+
+                if !fetch_status.success() {
+                    return Err(std::io::Error::other(format!(
+                        "git fetch failed with exit code {:?}",
+                        fetch_status.code()
+                    )))
                     .context(GitCheckoutSnafu {
-                        url: repo.to_string(),
-                        git_ref: git_ref.to_string(),
-                    })?;
-                repo_cloned
-                    .set_head_detached(obj.id())
+                        url: clone_url.clone(),
+                        git_ref: ref_str.to_string(),
+                    });
+                }
+
+                let checkout_status = Command::new("git")
+                    .args(["-C"])
+                    .arg(package_path)
+                    .args(["checkout", "--quiet", ref_str])
+                    .status()
                     .context(GitCheckoutSnafu {
-                        url: repo.to_string(),
-                        git_ref: git_ref.to_string(),
+                        url: clone_url.clone(),
+                        git_ref: ref_str.to_string(),
                     })?;
-                repo_cloned.checkout_head(None).context(GitCheckoutSnafu {
-                    url: repo.to_string(),
-                    git_ref: git_ref.to_string(),
-                })?;
+
+                if !checkout_status.success() {
+                    return Err(std::io::Error::other(format!(
+                        "git checkout failed with exit code {:?}",
+                        checkout_status.code()
+                    )))
+                    .context(GitCheckoutSnafu {
+                        url: clone_url.clone(),
+                        git_ref: ref_str.to_string(),
+                    });
+                }
             }
-        } else {
-            // No ref specified: shallow clone default branch
-            let repo_url = dep.requested.replacen("git://", "https://", 1);
-            let mut fetch_opts = FetchOptions::new();
-            fetch_opts.depth(1);
-            RepoBuilder::new()
-                .fetch_options(fetch_opts)
-                .clone(&repo_url, package_path)
-                .context(GitCloneSnafu { url: repo_url })?;
         }
 
         // Link binaries for git dependencies (only for root-level packages)
@@ -351,7 +404,9 @@ pub async fn install_dep_with_tarball_url(
         unpack_archive(&mut archive, &package_path_owned, &tarball_url_owned)
     })
     .await
-    .unwrap_or_else(|e| panic!("extraction task panicked: {e}"))?;
+    .map_err(|e| Error::ExtractionTaskPanic {
+        message: e.to_string(),
+    })??;
 
     // Link binaries to node_modules/.bin/ (only for root-level packages)
     if !install_path.contains("/node_modules/") {

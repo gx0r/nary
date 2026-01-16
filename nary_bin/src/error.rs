@@ -1,38 +1,38 @@
 use snafu::prelude::*;
-use snafu::GenerateImplicitData;
 
 /// Error type for nary CLI
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     // === Library Errors ===
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Lib {
-        source: nary_lib::Error,
-        #[snafu(backtrace)]
+        #[snafu(source(from(nary_lib::Error, Box::new)))]
+        source: Box<nary_lib::Error>,
         backtrace: snafu::Backtrace,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Version {
-        source: nary_lib::VersionError,
+        #[snafu(source(from(nary_lib::VersionError, Box::new)))]
+        source: Box<nary_lib::VersionError>,
         backtrace: snafu::Backtrace,
     },
 
     // === Standard Error Types ===
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Io {
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Json {
         source: serde_json::Error,
         backtrace: snafu::Backtrace,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Http {
         source: reqwest::Error,
         backtrace: snafu::Backtrace,
@@ -79,48 +79,3 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-impl From<nary_lib::Error> for Error {
-    fn from(source: nary_lib::Error) -> Self {
-        Error::Lib {
-            source,
-            backtrace: snafu::Backtrace::generate(),
-        }
-    }
-}
-
-impl From<nary_lib::VersionError> for Error {
-    fn from(source: nary_lib::VersionError) -> Self {
-        Error::Version {
-            source,
-            backtrace: snafu::Backtrace::generate(),
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(source: std::io::Error) -> Self {
-        Error::Io {
-            source,
-            backtrace: snafu::Backtrace::generate(),
-        }
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(source: serde_json::Error) -> Self {
-        Error::Json {
-            source,
-            backtrace: snafu::Backtrace::generate(),
-        }
-    }
-}
-
-impl From<reqwest::Error> for Error {
-    fn from(source: reqwest::Error) -> Self {
-        Error::Http {
-            source,
-            backtrace: snafu::Backtrace::generate(),
-        }
-    }
-}

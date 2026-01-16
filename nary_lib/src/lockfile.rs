@@ -34,6 +34,10 @@ pub struct PackageLock {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageEntry {
+    /// The actual package name (used for aliased packages where path differs from name)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 
@@ -75,7 +79,7 @@ pub fn deps_from_lockfile(lock: &PackageLock) -> IndexMap<Dependency, ResolvedIn
         // "node_modules/lodash" -> "lodash"
         // "node_modules/express/node_modules/lodash" -> "lodash"
         // "node_modules/@scope/pkg" -> "@scope/pkg"
-        let name = key
+        let path_name = key
             .rsplit("node_modules/")
             .next()
             .unwrap_or(key)
@@ -87,12 +91,21 @@ pub fn deps_from_lockfile(lock: &PackageLock) -> IndexMap<Dependency, ResolvedIn
             None => continue,
         };
 
+        // Handle aliased packages: if entry.name differs from path-derived name,
+        // the path is the alias and entry.name is the actual package name
+        let (name, alias) = match &entry.name {
+            Some(actual_name) if actual_name != &path_name => {
+                (actual_name.clone(), Some(path_name))
+            }
+            _ => (path_name, None),
+        };
+
         let dep = Dependency {
             name,
             requested: version.clone(), // In lockfile, requested == resolved
             resolved: version,
             is_optional: entry.optional,
-            alias: None, // TODO: lockfile v3 doesn't store aliases, need to handle
+            alias,
         };
 
         // Convert dependencies to Vec<(String, String)>
@@ -120,6 +133,7 @@ mod tests {
 
     fn make_entry(version: &str) -> PackageEntry {
         PackageEntry {
+            name: None,
             version: Some(version.to_string()),
             resolved: Some(format!(
                 "https://registry.npmjs.org/pkg/-/pkg-{}.tgz",
@@ -134,6 +148,7 @@ mod tests {
 
     fn make_optional_entry(version: &str) -> PackageEntry {
         PackageEntry {
+            name: None,
             version: Some(version.to_string()),
             resolved: None,
             integrity: None,
@@ -302,6 +317,7 @@ mod tests {
         packages.insert(
             "node_modules/express".to_string(),
             PackageEntry {
+                name: None,
                 version: Some("4.18.2".to_string()),
                 resolved: Some(
                     "https://registry.npmjs.org/express/-/express-4.18.2.tgz".to_string(),

@@ -131,7 +131,7 @@ pub enum Error {
     #[snafu(display("Failed to clone {url}"))]
     GitClone {
         url: String,
-        source: git2::Error,
+        source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
 
@@ -139,7 +139,7 @@ pub enum Error {
     GitCheckout {
         url: String,
         git_ref: String,
-        source: git2::Error,
+        source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
 
@@ -183,6 +183,10 @@ pub enum Error {
         peer: String,
         required: String,
     },
+
+    // === Task Errors ===
+    #[snafu(display("Extraction task panicked: {message}"))]
+    ExtractionTaskPanic { message: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

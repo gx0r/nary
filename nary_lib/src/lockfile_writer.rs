@@ -45,9 +45,17 @@ pub fn build_package_lock(
                 deps.insert(name.clone(), version.clone());
             }
         }
+        // For aliased packages, include the actual package name
+        let name = if dep.alias.is_some() {
+            Some(dep.name.clone())
+        } else {
+            None
+        };
+
         packages.insert(
             key,
             PackageEntry {
+                name,
                 version: Some(dep.resolved.clone()),
                 resolved: info.tarball_url.clone(),
                 integrity: info.integrity.clone(),
