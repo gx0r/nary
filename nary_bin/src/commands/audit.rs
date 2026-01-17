@@ -251,6 +251,7 @@ pub async fn run_outdated(args: &OutdatedArgs) -> Result<()> {
                 resolved: String::new(),
                 is_optional: false,
                 alias: None,
+                install_path: None,
             };
 
             match nary_lib::fetch_package_root_metadata(client, &dep).await {
@@ -402,6 +403,7 @@ pub async fn run_update(args: &UpdateArgs) -> Result<()> {
                     resolved: String::new(),
                     is_optional: false,
                     alias: None,
+                    install_path: None,
                 };
 
                 match nary_lib::fetch_package_root_metadata(&client, &dep).await {

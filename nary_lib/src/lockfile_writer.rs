@@ -97,6 +97,7 @@ mod tests {
             resolved: version.to_string(),
             is_optional: optional,
             alias: None,
+            install_path: None,
         }
     }
 

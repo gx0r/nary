@@ -152,6 +152,7 @@ async fn it_will_build_dependency_map_with_mock() -> Result<()> {
         resolved: "1".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     // Configure to use mock server
@@ -215,6 +216,7 @@ async fn it_resolves_nested_dependencies() -> Result<()> {
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -223,6 +225,7 @@ async fn it_resolves_nested_dependencies() -> Result<()> {
         resolved: String::new(), // Will be resolved
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let config = RegistryConfig::with_registry(mock_server.uri());
@@ -298,6 +301,7 @@ async fn it_routes_scoped_packages_to_private_registry() -> Result<()> {
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![
@@ -307,6 +311,7 @@ async fn it_routes_scoped_packages_to_private_registry() -> Result<()> {
             resolved: String::new(),
             is_optional: false,
             alias: None,
+            install_path: None,
         },
         Dependency {
             name: "@myorg/utils".to_string(),
@@ -314,6 +319,7 @@ async fn it_routes_scoped_packages_to_private_registry() -> Result<()> {
             resolved: String::new(),
             is_optional: false,
             alias: None,
+            install_path: None,
         },
     ];
 
@@ -402,6 +408,7 @@ async fn it_sends_bearer_token_auth_header() -> Result<()> {
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -410,6 +417,7 @@ async fn it_sends_bearer_token_auth_header() -> Result<()> {
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let client = create_client()?;
@@ -487,6 +495,7 @@ async fn it_sends_basic_auth_header() -> Result<()> {
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -495,6 +504,7 @@ async fn it_sends_basic_auth_header() -> Result<()> {
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let client = create_client()?;
@@ -530,6 +540,7 @@ async fn it_handles_401_unauthorized() -> Result<(), Box<dyn std::error::Error>>
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -538,6 +549,7 @@ async fn it_handles_401_unauthorized() -> Result<(), Box<dyn std::error::Error>>
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let client = create_client()?;
@@ -627,6 +639,7 @@ async fn it_applies_maturity_fallback_to_older_version() -> Result<()> {
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -635,6 +648,7 @@ async fn it_applies_maturity_fallback_to_older_version() -> Result<()> {
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let config = RegistryConfig::with_registry(mock_server.uri());
@@ -723,6 +737,7 @@ async fn it_allows_new_packages_when_flag_set() -> Result<()> {
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -731,6 +746,7 @@ async fn it_allows_new_packages_when_flag_set() -> Result<()> {
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let config = RegistryConfig::with_registry(mock_server.uri());
@@ -807,6 +823,7 @@ async fn it_errors_when_all_versions_too_new() -> Result<(), Box<dyn std::error:
         resolved: "1.0.0".to_string(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
 
     let dependencies = vec![Dependency {
@@ -815,6 +832,7 @@ async fn it_errors_when_all_versions_too_new() -> Result<(), Box<dyn std::error:
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     }];
 
     let config = RegistryConfig::with_registry(mock_server.uri());
@@ -841,4 +859,135 @@ async fn it_errors_when_all_versions_too_new() -> Result<(), Box<dyn std::error:
     assert!(err.to_string().contains("No mature version"));
 
     Ok(())
+}
+
+/// Test that lockfile parsing correctly handles the same package@version at multiple paths.
+/// This is a regression test for a bug where packages like fdir@6.5.0 would be deduplicated
+/// even when needed at both node_modules/tinyglobby/node_modules/fdir AND
+/// node_modules/vite/node_modules/fdir.
+#[test]
+fn test_lockfile_same_version_at_multiple_nested_paths() {
+    use indexmap::IndexMap;
+    use nary_lib::lockfile::{deps_from_lockfile, PackageEntry, PackageLock};
+
+    // Simulate a lockfile where fdir@6.5.0 is needed at two different nested paths
+    // This happens when parent packages have conflicting peer dependencies
+    let mut packages = IndexMap::new();
+
+    // Root entry
+    packages.insert(
+        "".to_string(),
+        PackageEntry {
+            version: Some("1.0.0".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // Parent package 1: tinyglobby
+    packages.insert(
+        "node_modules/tinyglobby".to_string(),
+        PackageEntry {
+            version: Some("0.2.15".to_string()),
+            resolved: Some(
+                "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.15.tgz".to_string(),
+            ),
+            integrity: Some("sha512-abc".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // Parent package 2: vite
+    packages.insert(
+        "node_modules/vite".to_string(),
+        PackageEntry {
+            version: Some("6.0.0".to_string()),
+            resolved: Some("https://registry.npmjs.org/vite/-/vite-6.0.0.tgz".to_string()),
+            integrity: Some("sha512-def".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // fdir@6.5.0 nested under tinyglobby
+    packages.insert(
+        "node_modules/tinyglobby/node_modules/fdir".to_string(),
+        PackageEntry {
+            version: Some("6.5.0".to_string()),
+            resolved: Some("https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz".to_string()),
+            integrity: Some("sha512-fdir".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // fdir@6.5.0 nested under vite (SAME version, different path)
+    packages.insert(
+        "node_modules/vite/node_modules/fdir".to_string(),
+        PackageEntry {
+            version: Some("6.5.0".to_string()),
+            resolved: Some("https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz".to_string()),
+            integrity: Some("sha512-fdir".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let lock = PackageLock {
+        name: Some("test-app".to_string()),
+        version: Some("1.0.0".to_string()),
+        lockfile_version: 3,
+        requires: true,
+        packages,
+    };
+
+    // Parse the lockfile
+    let deps = deps_from_lockfile(&lock);
+
+    // Should have 4 entries: tinyglobby, vite, and BOTH fdir instances
+    assert_eq!(
+        deps.len(),
+        4,
+        "Expected 4 packages but got {}. Packages: {:?}",
+        deps.len(),
+        deps.keys()
+            .map(|d| format!("{}@{} at {:?}", d.name, d.resolved, d.install_path))
+            .collect::<Vec<_>>()
+    );
+
+    // Count fdir entries - should be 2, not 1
+    let fdir_count = deps.iter().filter(|(d, _)| d.name == "fdir").count();
+    assert_eq!(
+        fdir_count, 2,
+        "Expected 2 fdir entries (one per nested path), got {}. \
+         This would fail if Dependency equality ignores install_path.",
+        fdir_count
+    );
+
+    // Verify both install paths are present
+    let fdir_paths: Vec<&str> = deps
+        .iter()
+        .filter(|(d, _)| d.name == "fdir")
+        .map(|(_, info)| info.install_path.as_str())
+        .collect();
+
+    assert!(
+        fdir_paths.contains(&"node_modules/tinyglobby/node_modules/fdir"),
+        "Missing fdir under tinyglobby. Found paths: {:?}",
+        fdir_paths
+    );
+    assert!(
+        fdir_paths.contains(&"node_modules/vite/node_modules/fdir"),
+        "Missing fdir under vite. Found paths: {:?}",
+        fdir_paths
+    );
+
+    // Verify the Dependency structs have install_path set (used for hash/eq)
+    for (dep, info) in deps.iter().filter(|(d, _)| d.name == "fdir") {
+        assert!(
+            dep.install_path.is_some(),
+            "fdir Dependency should have install_path set for lockfile entries"
+        );
+        assert_eq!(
+            dep.install_path.as_ref().unwrap(),
+            &info.install_path,
+            "Dependency.install_path should match ResolvedInfo.install_path"
+        );
+    }
 }

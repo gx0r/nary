@@ -106,6 +106,7 @@ pub fn deps_from_lockfile(lock: &PackageLock) -> IndexMap<Dependency, ResolvedIn
             resolved: version,
             is_optional: entry.optional,
             alias,
+            install_path: Some(key.clone()), // Include install path in identity for deduplication
         };
 
         // Convert dependencies to Vec<(String, String)>
@@ -230,6 +231,85 @@ mod tests {
             .collect();
         assert!(paths.contains(&"node_modules/qs"));
         assert!(paths.contains(&"node_modules/express/node_modules/qs"));
+    }
+
+    #[test]
+    fn test_deps_from_lockfile_same_version_multiple_paths() {
+        // Test case: same package@version installed at multiple paths
+        // This happens when different parent packages need conflicting peer deps
+        // e.g., tinyglobby and vite both need fdir@6.5.0 but at different paths
+        let mut packages = IndexMap::new();
+        packages.insert("".to_string(), PackageEntry::default());
+        packages.insert("node_modules/tinyglobby".to_string(), make_entry("0.2.15"));
+        packages.insert("node_modules/vite".to_string(), make_entry("6.0.0"));
+        // Same version of fdir at two different nested paths
+        packages.insert(
+            "node_modules/tinyglobby/node_modules/fdir".to_string(),
+            make_entry("6.5.0"),
+        );
+        packages.insert(
+            "node_modules/vite/node_modules/fdir".to_string(),
+            make_entry("6.5.0"),
+        );
+
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let deps = deps_from_lockfile(&lock);
+
+        // Should have all 4 packages: tinyglobby, vite, and both fdir instances
+        assert_eq!(deps.len(), 4);
+
+        // Both fdir entries should be preserved despite same name+version
+        let fdir_entries: Vec<_> = deps.iter().filter(|(d, _)| d.name == "fdir").collect();
+        assert_eq!(
+            fdir_entries.len(),
+            2,
+            "Both fdir instances should be preserved"
+        );
+
+        // Verify both install paths are present
+        let fdir_paths: Vec<&str> = fdir_entries
+            .iter()
+            .map(|(_, i)| i.install_path.as_str())
+            .collect();
+        assert!(
+            fdir_paths.contains(&"node_modules/tinyglobby/node_modules/fdir"),
+            "tinyglobby's fdir should be present"
+        );
+        assert!(
+            fdir_paths.contains(&"node_modules/vite/node_modules/fdir"),
+            "vite's fdir should be present"
+        );
+
+        // Verify install_path is part of Dependency identity
+        let fdir1 = deps
+            .iter()
+            .find(|(d, _)| {
+                d.name == "fdir"
+                    && d.install_path
+                        .as_ref()
+                        .map_or(false, |p| p.contains("tinyglobby"))
+            })
+            .expect("Should find tinyglobby's fdir");
+        let fdir2 = deps
+            .iter()
+            .find(|(d, _)| {
+                d.name == "fdir"
+                    && d.install_path
+                        .as_ref()
+                        .map_or(false, |p| p.contains("vite"))
+            })
+            .expect("Should find vite's fdir");
+
+        // They should be considered different dependencies due to install_path
+        assert_ne!(
+            fdir1.0, fdir2.0,
+            "fdir at different paths should be different Dependencies"
+        );
     }
 
     #[test]
@@ -364,6 +444,7 @@ mod tests {
                 resolved: "4.17.21".to_string(),
                 is_optional: false,
                 alias: None,
+                install_path: None,
             },
             ResolvedInfo {
                 tarball_url: Some(

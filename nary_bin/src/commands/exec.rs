@@ -42,6 +42,7 @@ pub async fn run_exec(args: &ExecArgs) -> Result<()> {
         resolved: String::new(),
         is_optional: false,
         alias: None,
+        install_path: None,
     };
     let metadata = nary_lib::fetch_package_root_metadata(&client, &root_dep).await?;
 
@@ -89,6 +90,7 @@ pub async fn run_exec(args: &ExecArgs) -> Result<()> {
             resolved: resolved_version.clone(),
             is_optional: false,
             alias: None,
+            install_path: None,
         };
 
         // Resolve all dependencies

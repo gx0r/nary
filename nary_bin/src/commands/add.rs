@@ -55,6 +55,7 @@ pub async fn run_add(args: &AddArgs) -> Result<()> {
                         resolved: String::new(),
                         is_optional: false,
                         alias: None,
+                        install_path: None,
                     };
                     let metadata = nary_lib::fetch_package_root_metadata(&client, &dep).await?;
                     let latest =

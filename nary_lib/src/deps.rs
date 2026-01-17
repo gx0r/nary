@@ -318,6 +318,7 @@ async fn fetch_deps_parallel(
                     resolved: unresolved_dep.requested.clone(),
                     is_optional: unresolved_dep.is_optional,
                     alias: unresolved_dep.alias.clone(),
+                    install_path: None,
                 };
                 return Ok(ResolvedDepInfo {
                     resolved_dep,
@@ -345,6 +346,7 @@ async fn fetch_deps_parallel(
                 resolved: resolve_result.version.to_string(),
                 is_optional: unresolved_dep.is_optional,
                 alias: unresolved_dep.alias.clone(),
+                install_path: None,
             };
 
             // Fetch version metadata to get transitive dependencies and tarball URL
@@ -409,11 +411,16 @@ pub struct Dependency {
     pub resolved: String,      // actual version to install (e.g., "4.17.21")
     pub is_optional: bool,     // from optionalDependencies
     pub alias: Option<String>, // install under this name instead (for npm: aliases)
+    /// Install path for lockfile entries - participates in hash/eq when set
+    /// This allows the same package@version to be installed at multiple paths
+    pub install_path: Option<String>,
 }
 
 impl PartialEq for Dependency {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.resolved == other.resolved
+        self.name == other.name
+            && self.resolved == other.resolved
+            && self.install_path == other.install_path
     }
 }
 
@@ -423,6 +430,7 @@ impl std::hash::Hash for Dependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.resolved.hash(state);
+        self.install_path.hash(state);
     }
 }
 
@@ -844,6 +852,7 @@ pub fn path_to_root_dependency(file: &Path) -> Result<Dependency> {
         resolved: version,
         is_optional: false,
         alias: None,
+        install_path: None,
     })
 }
 
@@ -987,6 +996,7 @@ pub fn serde_json_value_to_dependencies(
                     resolved: String::new(), // Will be resolved later
                     is_optional,
                     alias: if is_npm_alias { Some(alias_name) } else { None },
+                    install_path: None,
                 });
             }
         }
@@ -1100,6 +1110,7 @@ mod tests {
             resolved: resolved.to_string(),
             is_optional: false,
             alias: None,
+            install_path: None,
         }
     }
 
@@ -1110,6 +1121,7 @@ mod tests {
             resolved: resolved.to_string(),
             is_optional: false,
             alias: Some(alias.to_string()),
+            install_path: None,
         }
     }
 
@@ -2177,6 +2189,7 @@ mod tests {
             resolved: String::new(),
             is_optional: false,
             alias: None,
+            install_path: None,
         };
 
         let result = cache.get_root_metadata(&dep).await;
@@ -2202,6 +2215,7 @@ mod tests {
             resolved: String::new(),
             is_optional: false,
             alias: None,
+            install_path: None,
         };
 
         let result = cache.get_root_metadata(&dep).await;
@@ -2238,6 +2252,7 @@ mod tests {
             resolved: "2.0.0".to_string(),
             is_optional: false,
             alias: None,
+            install_path: None,
         };
 
         let result = cache.get_version_metadata(&dep).await;
@@ -2263,6 +2278,7 @@ mod tests {
             resolved: "1.0.0".to_string(),
             is_optional: false,
             alias: None,
+            install_path: None,
         };
 
         let result = cache.get_version_metadata(&dep).await;

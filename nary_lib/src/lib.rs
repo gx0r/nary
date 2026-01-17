@@ -773,6 +773,7 @@ mod tests {
             resolved: String::new(),
             is_optional: false,
             alias: None,
+            install_path: None,
         }
     }
 
