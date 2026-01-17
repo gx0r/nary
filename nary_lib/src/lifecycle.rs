@@ -72,6 +72,7 @@ pub fn generate_sandbox_profile(project_root: &Path) -> String {
   (subpath "{project}")
   (subpath "{home}/.npm")
   (subpath "{home}/.cache")
+  (subpath "{home}/.config")
   (subpath "/private/tmp")
   (subpath "/private/var/folders")
   (subpath "/var/folders")
