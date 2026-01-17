@@ -79,11 +79,10 @@ fn read_root_dependencies(root_path: &Path) -> HashMap<String, RootDependency> {
 /// Parse package spec like "lodash@4.17.21" into (name, optional_version)
 fn parse_package_spec(spec: &str) -> (&str, Option<&str>) {
     // Handle scoped packages like @types/node@20.0.0
-    if spec.starts_with('@') {
+    if let Some(rest) = spec.strip_prefix('@') {
         // Find the second @ which separates name from version
-        if let Some(pos) = spec[1..].find('@') {
-            let split_pos = pos + 1;
-            return (&spec[..split_pos], Some(&spec[split_pos + 1..]));
+        if let Some(pos) = rest.find('@') {
+            return (&spec[..pos + 1], Some(&rest[pos + 1..]));
         }
         return (spec, None);
     }

@@ -58,6 +58,9 @@ struct ParentInfo {
     version_constraint: String,
 }
 
+/// BFS queue entry: (current_path, path_so_far with requested constraints)
+type BfsQueue = VecDeque<(String, Vec<(String, Option<String>)>)>;
+
 /// Build a reverse dependency graph from the lockfile
 /// Returns: child_path -> Vec<ParentInfo>
 fn build_reverse_graph(
@@ -328,8 +331,7 @@ fn bfs_to_root(
 ) -> Vec<DependencyPath> {
     let mut result = Vec::new();
 
-    // Queue: (current_path, path_so_far with requested constraints)
-    let mut queue: VecDeque<(String, Vec<(String, Option<String>)>)> = VecDeque::new();
+    let mut queue: BfsQueue = VecDeque::new();
     queue.push_back((start_path.to_string(), vec![(start_path.to_string(), None)]));
 
     let mut visited_states: HashSet<String> = HashSet::new();
@@ -723,5 +725,436 @@ mod tests {
         };
         let output = format_why_text(&result);
         assert!(output.contains("not installed"));
+    }
+
+    #[test]
+    fn test_name_from_path_simple() {
+        assert_eq!(name_from_path("node_modules/lodash"), "lodash");
+        assert_eq!(name_from_path("node_modules/express"), "express");
+    }
+
+    #[test]
+    fn test_name_from_path_scoped() {
+        assert_eq!(name_from_path("node_modules/@scope/pkg"), "@scope/pkg");
+        assert_eq!(name_from_path("node_modules/@babel/core"), "@babel/core");
+        assert_eq!(name_from_path("node_modules/@types/node"), "@types/node");
+    }
+
+    #[test]
+    fn test_name_from_path_nested() {
+        assert_eq!(name_from_path("node_modules/express/node_modules/qs"), "qs");
+        assert_eq!(
+            name_from_path("node_modules/a/node_modules/b/node_modules/c"),
+            "c"
+        );
+        assert_eq!(
+            name_from_path("node_modules/foo/node_modules/@scope/bar"),
+            "@scope/bar"
+        );
+    }
+
+    #[test]
+    fn test_name_from_path_edge_cases() {
+        // Empty or unusual paths
+        assert_eq!(name_from_path(""), "");
+        assert_eq!(name_from_path("lodash"), "lodash");
+    }
+
+    #[test]
+    fn test_is_direct_dependency() {
+        assert!(is_direct_dependency("node_modules/lodash"));
+        assert!(is_direct_dependency("node_modules/@scope/pkg"));
+        assert!(!is_direct_dependency("node_modules/a/node_modules/b"));
+        assert!(!is_direct_dependency(
+            "node_modules/x/node_modules/@scope/y"
+        ));
+        assert!(!is_direct_dependency("")); // root is not a direct dependency
+        assert!(!is_direct_dependency("some/other/path"));
+    }
+
+    #[test]
+    fn test_find_dependency_path_hoisted() {
+        // Test that find_dependency_path looks up the tree
+        let mut packages = IndexMap::new();
+        packages.insert("".to_string(), make_entry("1.0.0", vec![]));
+        packages.insert(
+            "node_modules/express".to_string(),
+            make_entry("4.18.2", vec![("qs", "^6.0.0")]),
+        );
+        packages.insert("node_modules/qs".to_string(), make_entry("6.11.0", vec![]));
+
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        // qs is hoisted to root, so express's dep on qs should find it there
+        let result = find_dependency_path(&lock, "node_modules/express", "qs");
+        assert_eq!(result, Some("node_modules/qs".to_string()));
+    }
+
+    #[test]
+    fn test_find_dependency_path_nested() {
+        // Test that nested dependency is found before hoisted
+        let mut packages = IndexMap::new();
+        packages.insert("".to_string(), make_entry("1.0.0", vec![]));
+        packages.insert(
+            "node_modules/express".to_string(),
+            make_entry("4.18.2", vec![("qs", "^6.5.0")]),
+        );
+        packages.insert("node_modules/qs".to_string(), make_entry("6.11.0", vec![]));
+        packages.insert(
+            "node_modules/express/node_modules/qs".to_string(),
+            make_entry("6.5.0", vec![]),
+        );
+
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        // express should find its nested qs first
+        let result = find_dependency_path(&lock, "node_modules/express", "qs");
+        assert_eq!(
+            result,
+            Some("node_modules/express/node_modules/qs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_dependency_path_not_found() {
+        let mut packages = IndexMap::new();
+        packages.insert("".to_string(), make_entry("1.0.0", vec![]));
+
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependency_path(&lock, "node_modules/express", "lodash");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_dependents_simple() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("express", "^4.0.0")]),
+        );
+        packages.insert(
+            "node_modules/express".to_string(),
+            make_entry("4.18.2", vec![("qs", "^6.0.0")]),
+        );
+        packages.insert("node_modules/qs".to_string(), make_entry("6.11.0", vec![]));
+
+        let lock = PackageLock {
+            name: Some("test-app".to_string()),
+            version: Some("1.0.0".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependents(&lock, "qs");
+        assert_eq!(result.paths.len(), 1);
+        assert_eq!(result.paths[0].nodes[0].name, "express");
+    }
+
+    #[test]
+    fn test_find_dependents_multiple() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("express", "^4.0.0"), ("koa", "^2.0.0")]),
+        );
+        packages.insert(
+            "node_modules/express".to_string(),
+            make_entry("4.18.2", vec![("qs", "^6.0.0")]),
+        );
+        packages.insert(
+            "node_modules/koa".to_string(),
+            make_entry("2.14.0", vec![("qs", "^6.0.0")]),
+        );
+        packages.insert("node_modules/qs".to_string(), make_entry("6.11.0", vec![]));
+
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependents(&lock, "qs");
+        assert_eq!(result.paths.len(), 2);
+        let names: Vec<&str> = result
+            .paths
+            .iter()
+            .map(|p| p.nodes[0].name.as_str())
+            .collect();
+        assert!(names.contains(&"express"));
+        assert!(names.contains(&"koa"));
+    }
+
+    #[test]
+    fn test_find_dependents_with_root() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("lodash", "^4.0.0")]),
+        );
+        packages.insert(
+            "node_modules/lodash".to_string(),
+            make_entry("4.17.21", vec![]),
+        );
+
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let mut root_deps = HashMap::new();
+        root_deps.insert(
+            "lodash".to_string(),
+            RootDependency {
+                constraint: "^4.0.0".to_string(),
+                is_dev: false,
+                is_optional: false,
+            },
+        );
+
+        let result = find_dependents_with_options(
+            &lock,
+            "lodash",
+            &WhyOptions {
+                root_deps,
+                version_filter: None,
+            },
+        );
+        assert!(result.paths.iter().any(|p| p.nodes[0].name == "(root)"));
+    }
+
+    #[test]
+    fn test_find_dependency_paths_deep_chain() {
+        // a -> b -> c -> d
+        let mut packages = IndexMap::new();
+        packages.insert("".to_string(), make_entry("1.0.0", vec![("a", "^1.0.0")]));
+        packages.insert(
+            "node_modules/a".to_string(),
+            make_entry("1.0.0", vec![("b", "^1.0.0")]),
+        );
+        packages.insert(
+            "node_modules/b".to_string(),
+            make_entry("1.0.0", vec![("c", "^1.0.0")]),
+        );
+        packages.insert(
+            "node_modules/c".to_string(),
+            make_entry("1.0.0", vec![("d", "^1.0.0")]),
+        );
+        packages.insert("node_modules/d".to_string(), make_entry("1.0.0", vec![]));
+
+        let lock = PackageLock {
+            name: Some("test".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependency_paths(&lock, "d");
+        assert!(!result.paths.is_empty());
+
+        // Check the chain length - should be root -> a -> b -> c -> d
+        let path = &result.paths[0];
+        assert_eq!(path.nodes.len(), 5); // root + a + b + c + d
+    }
+
+    #[test]
+    fn test_find_dependency_paths_with_version_filter() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("express", "^4.0.0"), ("qs", "^6.12.0")]),
+        );
+        packages.insert(
+            "node_modules/express".to_string(),
+            make_entry("4.18.2", vec![("qs", "^6.0.0")]),
+        );
+        packages.insert("node_modules/qs".to_string(), make_entry("6.12.0", vec![]));
+        packages.insert(
+            "node_modules/express/node_modules/qs".to_string(),
+            make_entry("6.5.0", vec![]),
+        );
+
+        let lock = PackageLock {
+            name: Some("test-app".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        // Filter to only version 6.5.0
+        let result = find_dependency_paths_with_options(
+            &lock,
+            "qs",
+            &WhyOptions {
+                root_deps: HashMap::new(),
+                version_filter: Some("6.5.0".to_string()),
+            },
+        );
+
+        assert_eq!(result.versions, vec!["6.5.0"]);
+        // Should only have paths to the 6.5.0 version
+        for path in &result.paths {
+            if let Some(last) = path.nodes.last() {
+                assert_eq!(last.version, "6.5.0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_empty_lockfile() {
+        let packages = IndexMap::new();
+        let lock = PackageLock {
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependency_paths(&lock, "anything");
+        assert!(result.paths.is_empty());
+        assert!(result.versions.is_empty());
+    }
+
+    #[test]
+    fn test_root_only_lockfile() {
+        let mut packages = IndexMap::new();
+        packages.insert("".to_string(), make_entry("1.0.0", vec![]));
+
+        let lock = PackageLock {
+            name: Some("my-app".to_string()),
+            version: Some("1.0.0".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependency_paths(&lock, "lodash");
+        assert!(result.paths.is_empty());
+    }
+
+    #[test]
+    fn test_scoped_package_dependency() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("@babel/core", "^7.0.0")]),
+        );
+        packages.insert(
+            "node_modules/@babel/core".to_string(),
+            make_entry("7.23.0", vec![("@babel/types", "^7.0.0")]),
+        );
+        packages.insert(
+            "node_modules/@babel/types".to_string(),
+            make_entry("7.23.0", vec![]),
+        );
+
+        let lock = PackageLock {
+            name: Some("test-app".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependency_paths(&lock, "@babel/types");
+        assert!(!result.paths.is_empty());
+        assert_eq!(result.versions, vec!["7.23.0"]);
+    }
+
+    #[test]
+    fn test_format_why_json_installed() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("lodash", "^4.0.0")]),
+        );
+        packages.insert(
+            "node_modules/lodash".to_string(),
+            make_entry("4.17.21", vec![]),
+        );
+
+        let lock = PackageLock {
+            name: Some("test-app".to_string()),
+            version: Some("1.0.0".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let result = find_dependency_paths(&lock, "lodash");
+        let json = format_why_json(&result);
+
+        assert_eq!(json["package"], "lodash");
+        assert_eq!(json["installed"], true);
+        assert!(json["versions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("4.17.21")));
+    }
+
+    #[test]
+    fn test_format_why_json_not_installed() {
+        let result = WhyResult {
+            package: "nonexistent".to_string(),
+            paths: vec![],
+            versions: vec![],
+        };
+        let json = format_why_json(&result);
+
+        assert_eq!(json["package"], "nonexistent");
+        assert_eq!(json["installed"], false);
+        assert!(json["paths"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dev_and_optional_flags() {
+        let mut packages = IndexMap::new();
+        packages.insert(
+            "".to_string(),
+            make_entry("1.0.0", vec![("jest", "^29.0.0")]),
+        );
+        let mut jest_entry = make_entry("29.0.0", vec![]);
+        jest_entry.dev = true;
+        packages.insert("node_modules/jest".to_string(), jest_entry);
+
+        let lock = PackageLock {
+            name: Some("test-app".to_string()),
+            lockfile_version: 3,
+            packages,
+            ..Default::default()
+        };
+
+        let mut root_deps = HashMap::new();
+        root_deps.insert(
+            "jest".to_string(),
+            RootDependency {
+                constraint: "^29.0.0".to_string(),
+                is_dev: true,
+                is_optional: false,
+            },
+        );
+
+        let result = find_dependency_paths_with_options(
+            &lock,
+            "jest",
+            &WhyOptions {
+                root_deps,
+                version_filter: None,
+            },
+        );
+
+        assert!(!result.paths.is_empty());
     }
 }

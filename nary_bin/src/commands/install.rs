@@ -1,7 +1,7 @@
 use futures::stream::{self, StreamExt};
 use owo_colors::{OwoColorize, Stream};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,6 +17,17 @@ use nary_lib::{
 
 use crate::error::Result;
 use crate::{InstallArgs, InstallResult, MAX_CONCURRENT, RENDER_DEBOUNCE_MS};
+
+/// Options for install operations
+struct InstallOptions {
+    include_dev: bool,
+    ignore_scripts: bool,
+    no_package_lock: bool,
+    assume_yes: bool,
+    sandbox: bool,
+    allow_new_packages: bool,
+    offline: bool,
+}
 
 /// Prompt user and run lifecycle scripts if approved
 pub(crate) fn prompt_and_run_lifecycle_scripts(
@@ -53,7 +64,7 @@ pub(crate) fn prompt_and_run_lifecycle_scripts(
 
     let should_run = if assume_yes {
         true
-    } else if atty::is(atty::Stream::Stdin) {
+    } else if std::io::stdin().is_terminal() {
         eprint!("Run scripts? [y/N] ");
         io::stderr().flush().ok();
         let mut input = String::new();
@@ -79,7 +90,15 @@ pub(crate) fn prompt_and_run_lifecycle_scripts(
 
 pub async fn run_install(args: &InstallArgs) -> Result<()> {
     let root_path = Path::new(".");
-    let include_dev = !args.production;
+    let opts = InstallOptions {
+        include_dev: !args.production,
+        ignore_scripts: args.ignore_scripts,
+        no_package_lock: args.no_package_lock,
+        assume_yes: args.assume_yes,
+        sandbox: !args.no_sandbox,
+        allow_new_packages: args.allow_new_packages,
+        offline: args.offline,
+    };
 
     // Check if this is a workspace
     if let Some(workspace) = WorkspaceConfig::detect(root_path) {
@@ -91,43 +110,14 @@ pub async fn run_install(args: &InstallArgs) -> Result<()> {
             eprintln!("  - {} ({})", member.name, member.path.display());
         }
 
-        install_workspace(
-            &workspace,
-            include_dev,
-            args.ignore_scripts,
-            args.no_package_lock,
-            args.assume_yes,
-            !args.no_sandbox,
-            args.allow_new_packages,
-            args.offline,
-        )
-        .await
+        install_workspace(&workspace, &opts).await
     } else {
-        install(
-            root_path,
-            include_dev,
-            args.ignore_scripts,
-            args.no_package_lock,
-            args.assume_yes,
-            !args.no_sandbox,
-            args.allow_new_packages,
-            args.offline,
-        )
-        .await
+        install(root_path, &opts).await
     }
 }
 
 /// Install a workspace - collects deps from all members and installs to root
-async fn install_workspace(
-    workspace: &WorkspaceConfig,
-    include_dev: bool,
-    ignore_scripts: bool,
-    no_package_lock: bool,
-    assume_yes: bool,
-    sandbox: bool,
-    allow_new_packages: bool,
-    offline: bool,
-) -> Result<()> {
+async fn install_workspace(workspace: &WorkspaceConfig, opts: &InstallOptions) -> Result<()> {
     use nary_lib::{workspace::is_workspace_protocol, Dependency};
     use std::sync::atomic::AtomicU64;
 
@@ -141,13 +131,13 @@ async fn install_workspace(
     let mut workspace_links: Vec<(String, String)> = Vec::new(); // (from_member, to_member)
 
     // Add root dependencies
-    if let Ok(root_deps) = path_to_dependencies(root_path, include_dev) {
+    if let Ok(root_deps) = path_to_dependencies(root_path, opts.include_dev) {
         all_deps.extend(root_deps);
     }
 
     // Add dependencies from each member
     for member in &workspace.members {
-        if let Ok(member_deps) = path_to_dependencies(&member.abs_path, include_dev) {
+        if let Ok(member_deps) = path_to_dependencies(&member.abs_path, opts.include_dev) {
             for dep in member_deps {
                 if is_workspace_protocol(&dep.requested) {
                     // This is a workspace reference - record it for symlinking
@@ -176,15 +166,15 @@ async fn install_workspace(
             .minimum_release_age
             .unwrap_or(DEFAULT_MATURITY_MINUTES),
         excluded_packages: npmrc.maturity_exclude.clone(),
-        allow_new_packages,
+        allow_new_packages: opts.allow_new_packages,
     };
     let resolve_options = ResolveOptions {
         optimize: false,
         maturity: maturity_config,
-        offline,
+        offline: opts.offline,
     };
 
-    if offline {
+    if opts.offline {
         eprintln!("Running in offline mode - using cached packages only");
     }
 
@@ -233,7 +223,7 @@ async fn install_workspace(
         }
 
         // Write package-lock.json
-        if !no_package_lock {
+        if !opts.no_package_lock {
             let lock = build_package_lock(&root.name, &root.resolved, &depends);
             write_package_lock(&lockfile_path, &lock)?;
             eprintln!("Created package-lock.json");
@@ -255,7 +245,11 @@ async fn install_workspace(
 
     let counter = Arc::new(AtomicU64::new(0));
     let node_modules = root_path.join("node_modules");
-    let runner = Arc::new(LifecycleRunner::with_sandbox(&node_modules, sandbox));
+    let runner = Arc::new(LifecycleRunner::with_sandbox(&node_modules, opts.sandbox));
+
+    // Copy values for use in async closure
+    let offline = opts.offline;
+    let ignore_scripts = opts.ignore_scripts;
 
     let results: Vec<(String, bool, nary_lib::Result<()>, Option<ScriptAudit>)> =
         stream::iter(depends.iter().map(|(dep, info)| {
@@ -319,8 +313,8 @@ async fn install_workspace(
     }
 
     // Handle lifecycle scripts if needed
-    if !ignore_scripts {
-        prompt_and_run_lifecycle_scripts(&audits, &runner, assume_yes, false);
+    if !opts.ignore_scripts {
+        prompt_and_run_lifecycle_scripts(&audits, &runner, opts.assume_yes, false);
     }
 
     // Create symlinks for workspace members in root node_modules
@@ -399,16 +393,7 @@ async fn install_workspace(
     Ok(())
 }
 
-async fn install(
-    root_path: &Path,
-    include_dev: bool,
-    ignore_scripts: bool,
-    no_package_lock: bool,
-    assume_yes: bool,
-    sandbox: bool,
-    allow_new_packages: bool,
-    offline: bool,
-) -> Result<()> {
+async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
     use dashmap::DashMap;
     use std::sync::atomic::AtomicU64;
     use std::time::Instant;
@@ -436,15 +421,15 @@ async fn install(
             .minimum_release_age
             .unwrap_or(DEFAULT_MATURITY_MINUTES),
         excluded_packages: npmrc.maturity_exclude.clone(),
-        allow_new_packages,
+        allow_new_packages: opts.allow_new_packages,
     };
     let resolve_options = ResolveOptions {
         optimize: false,
         maturity: maturity_config,
-        offline,
+        offline: opts.offline,
     };
 
-    if offline {
+    if opts.offline {
         eprintln!("Running in offline mode - using cached packages only");
     }
 
@@ -452,7 +437,7 @@ async fn install(
         eprintln!("Using existing package-lock.json");
         deps_from_lockfile(&lock)
     } else {
-        let dependencies = path_to_dependencies(root_path, include_dev)?;
+        let dependencies = path_to_dependencies(root_path, opts.include_dev)?;
 
         // Spinner for resolution phase
         let spinner = ProgressBar::new_spinner()
@@ -495,7 +480,7 @@ async fn install(
         }
 
         // Write package-lock.json
-        if !no_package_lock {
+        if !opts.no_package_lock {
             let lock = build_package_lock(&root.name, &root.resolved, &depends);
             write_package_lock(&lockfile_path, &lock)?;
             eprintln!("Created package-lock.json");
@@ -644,7 +629,11 @@ async fn install(
 
     // Create lifecycle runner to check for scripts during install (avoids post-install lag)
     let node_modules = Path::new("./node_modules");
-    let runner = Arc::new(LifecycleRunner::with_sandbox(node_modules, sandbox));
+    let runner = Arc::new(LifecycleRunner::with_sandbox(node_modules, opts.sandbox));
+
+    // Copy values for use in async closure
+    let offline = opts.offline;
+    let ignore_scripts = opts.ignore_scripts;
 
     // Install dependencies with limited concurrency to avoid "too many open files"
 
@@ -820,7 +809,7 @@ async fn install(
     }
 
     // Run lifecycle scripts (audits is empty if --ignore-scripts)
-    prompt_and_run_lifecycle_scripts(&audits, &runner, assume_yes, true);
+    prompt_and_run_lifecycle_scripts(&audits, &runner, opts.assume_yes, true);
 
     Ok(())
 }

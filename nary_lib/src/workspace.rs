@@ -222,4 +222,168 @@ mod tests {
             "^1.0.0"
         );
     }
+
+    #[test]
+    fn test_parse_workspace_globs_invalid() {
+        // String value (not array or object)
+        let json: Value = serde_json::json!("packages/*");
+        assert!(parse_workspace_globs(&json).is_none());
+
+        // Null value
+        let json: Value = serde_json::json!(null);
+        assert!(parse_workspace_globs(&json).is_none());
+
+        // Number value
+        let json: Value = serde_json::json!(42);
+        assert!(parse_workspace_globs(&json).is_none());
+
+        // Boolean value
+        let json: Value = serde_json::json!(true);
+        assert!(parse_workspace_globs(&json).is_none());
+    }
+
+    #[test]
+    fn test_parse_workspace_globs_empty_array() {
+        let json: Value = serde_json::json!([]);
+        let globs = parse_workspace_globs(&json).unwrap();
+        assert!(globs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_workspace_globs_mixed_types() {
+        // Array with mixed types - should only pick up strings
+        let json: Value = serde_json::json!(["packages/*", 123, null, "apps/*"]);
+        let globs = parse_workspace_globs(&json).unwrap();
+        assert_eq!(globs, vec!["packages/*", "apps/*"]);
+    }
+
+    #[test]
+    fn test_parse_workspace_globs_nested_object() {
+        // Object without "packages" key
+        let json: Value = serde_json::json!({
+            "nohoist": ["**/react"]
+        });
+        assert!(parse_workspace_globs(&json).is_none());
+    }
+
+    #[test]
+    fn test_parse_workspace_globs_object_with_empty_packages() {
+        let json: Value = serde_json::json!({
+            "packages": []
+        });
+        let globs = parse_workspace_globs(&json).unwrap();
+        assert!(globs.is_empty());
+    }
+
+    #[test]
+    fn test_is_workspace_protocol_edge_cases() {
+        // Edge cases
+        assert!(is_workspace_protocol("workspace:"));
+        assert!(!is_workspace_protocol(""));
+        assert!(!is_workspace_protocol("workspac:*")); // typo
+        assert!(!is_workspace_protocol("Workspace:*")); // case sensitive
+        assert!(!is_workspace_protocol(" workspace:*")); // leading space
+    }
+
+    #[test]
+    fn test_resolve_workspace_version_edge_cases() {
+        // Without workspace: prefix (shouldn't happen but handle gracefully)
+        assert_eq!(resolve_workspace_version("*", "1.0.0"), "1.0.0");
+        assert_eq!(resolve_workspace_version("^", "1.0.0"), "^1.0.0");
+        assert_eq!(resolve_workspace_version("~", "1.0.0"), "~1.0.0");
+
+        // Complex version specifiers
+        assert_eq!(
+            resolve_workspace_version("workspace:>=1.0.0", "2.0.0"),
+            ">=1.0.0"
+        );
+        assert_eq!(
+            resolve_workspace_version("workspace:1.0.0 - 2.0.0", "1.5.0"),
+            "1.0.0 - 2.0.0"
+        );
+
+        // Prerelease versions
+        assert_eq!(
+            resolve_workspace_version("workspace:*", "1.0.0-beta.1"),
+            "1.0.0-beta.1"
+        );
+        assert_eq!(
+            resolve_workspace_version("workspace:^", "2.0.0-alpha"),
+            "^2.0.0-alpha"
+        );
+    }
+
+    #[test]
+    fn test_workspace_config_get_member() {
+        let config = WorkspaceConfig {
+            root_path: PathBuf::from("/test"),
+            name: "test-workspace".to_string(),
+            version: "1.0.0".to_string(),
+            members: vec![
+                WorkspaceMember {
+                    name: "@scope/pkg-a".to_string(),
+                    version: "1.0.0".to_string(),
+                    path: PathBuf::from("packages/pkg-a"),
+                    abs_path: PathBuf::from("/test/packages/pkg-a"),
+                },
+                WorkspaceMember {
+                    name: "pkg-b".to_string(),
+                    version: "2.0.0".to_string(),
+                    path: PathBuf::from("packages/pkg-b"),
+                    abs_path: PathBuf::from("/test/packages/pkg-b"),
+                },
+            ],
+        };
+
+        // Find existing member
+        let member = config.get_member("@scope/pkg-a");
+        assert!(member.is_some());
+        assert_eq!(member.unwrap().version, "1.0.0");
+
+        let member = config.get_member("pkg-b");
+        assert!(member.is_some());
+        assert_eq!(member.unwrap().version, "2.0.0");
+
+        // Non-existent member
+        assert!(config.get_member("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_workspace_config_is_member() {
+        let config = WorkspaceConfig {
+            root_path: PathBuf::from("/test"),
+            name: "test-workspace".to_string(),
+            version: "1.0.0".to_string(),
+            members: vec![WorkspaceMember {
+                name: "pkg-a".to_string(),
+                version: "1.0.0".to_string(),
+                path: PathBuf::from("packages/pkg-a"),
+                abs_path: PathBuf::from("/test/packages/pkg-a"),
+            }],
+        };
+
+        assert!(config.is_member("pkg-a"));
+        assert!(!config.is_member("pkg-b"));
+        assert!(!config.is_member(""));
+    }
+
+    #[test]
+    fn test_workspace_config_detect_no_package_json() {
+        // Test with a path that doesn't exist or has no package.json
+        let result = WorkspaceConfig::detect(Path::new("/nonexistent/path"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_workspace_member_scoped_package() {
+        let member = WorkspaceMember {
+            name: "@myorg/shared-utils".to_string(),
+            version: "0.1.0".to_string(),
+            path: PathBuf::from("packages/shared-utils"),
+            abs_path: PathBuf::from("/workspace/packages/shared-utils"),
+        };
+
+        assert!(member.name.starts_with('@'));
+        assert!(member.name.contains('/'));
+    }
 }
