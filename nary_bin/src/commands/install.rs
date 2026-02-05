@@ -10,9 +10,10 @@ use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 
 use nary_lib::{
     build_package_lock, calculate_depends_with_options, create_client, deps_from_lockfile,
-    get_audit_summary, install_dep_with_tarball_url, path_to_dependencies, path_to_root_dependency,
-    read_package_lock, scan_node_modules, write_package_lock, LifecycleRunner, MaturityConfig,
-    NpmrcConfig, ResolveOptions, ScriptAudit, WorkspaceConfig, DEFAULT_MATURITY_MINUTES,
+    get_audit_summary, install_dep_with_tarball_url, path_to_dependencies, path_to_overrides,
+    path_to_root_dependency, read_package_lock, scan_node_modules, write_package_lock,
+    LifecycleRunner, MaturityConfig, NpmrcConfig, ResolveOptions, ScriptAudit, WorkspaceConfig,
+    DEFAULT_MATURITY_MINUTES,
 };
 
 use crate::error::Result;
@@ -168,20 +169,83 @@ async fn install_workspace(workspace: &WorkspaceConfig, opts: &InstallOptions) -
         excluded_packages: npmrc.maturity_exclude.clone(),
         allow_new_packages: opts.allow_new_packages,
     };
+
+    // Parse overrides from root package.json
+    let overrides = path_to_overrides(root_path);
+    if overrides.is_some() {
+        eprintln!("Using overrides from package.json");
+    }
+
     let resolve_options = ResolveOptions {
         optimize: false,
         maturity: maturity_config,
         offline: opts.offline,
+        overrides,
     };
 
     if opts.offline {
         eprintln!("Running in offline mode - using cached packages only");
     }
 
-    let depends = if let Some(lock) = read_package_lock(&lockfile_path) {
-        eprintln!("Using existing package-lock.json");
-        deps_from_lockfile(&lock)
+    // Overrides take precedence over lockfile - force re-resolution if overrides are configured
+    let use_lockfile = resolve_options.overrides.is_none();
+
+    let depends = if use_lockfile {
+        if let Some(lock) = read_package_lock(&lockfile_path) {
+            eprintln!("Using existing package-lock.json");
+            deps_from_lockfile(&lock)
+        } else {
+            // No lockfile, resolve fresh
+            let spinner = ProgressBar::new_spinner()
+                .with_style(
+                    ProgressStyle::default_spinner()
+                        .template("{spinner:.cyan} {msg}")
+                        .unwrap(),
+                )
+                .with_finish(ProgressFinish::AndClear);
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+            spinner.set_message("Resolving workspace dependencies...");
+
+            let depends = calculate_depends_with_options(
+                &client,
+                &root,
+                &all_deps,
+                |name, version| {
+                    spinner.set_message(format!("Resolving {}@{}", name, version));
+                },
+                &Default::default(),
+                &resolve_options,
+            )
+            .await?;
+
+            spinner.finish_and_clear();
+
+            // Print maturity fallback warnings
+            for (dep, info) in &depends {
+                if let Some(fallback) = &info.maturity_fallback {
+                    eprintln!(
+                        "{} {}@{} skipped (published {}, requires {} maturity) -> using {}",
+                        "warn:".if_supports_color(Stream::Stderr, |s| s.yellow()),
+                        dep.name,
+                        fallback.skipped_version,
+                        fallback.format_age(),
+                        fallback.format_required(),
+                        dep.resolved
+                    );
+                }
+            }
+
+            // Write package-lock.json
+            if !opts.no_package_lock {
+                let lock = build_package_lock(&root.name, &root.resolved, &depends);
+                write_package_lock(&lockfile_path, &lock)?;
+                eprintln!("Created package-lock.json");
+            }
+
+            depends
+        }
     } else {
+        // Overrides configured - always re-resolve to apply them
         // Spinner for resolution phase
         let spinner = ProgressBar::new_spinner()
             .with_style(
@@ -423,23 +487,87 @@ async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
         excluded_packages: npmrc.maturity_exclude.clone(),
         allow_new_packages: opts.allow_new_packages,
     };
+
+    // Parse overrides from package.json
+    let overrides = path_to_overrides(root_path);
+    if overrides.is_some() {
+        eprintln!("Using overrides from package.json");
+    }
+
     let resolve_options = ResolveOptions {
         optimize: false,
         maturity: maturity_config,
         offline: opts.offline,
+        overrides,
     };
 
     if opts.offline {
         eprintln!("Running in offline mode - using cached packages only");
     }
 
-    let depends = if let Some(lock) = read_package_lock(&lockfile_path) {
-        eprintln!("Using existing package-lock.json");
-        deps_from_lockfile(&lock)
+    // Overrides take precedence over lockfile - force re-resolution if overrides are configured
+    let use_lockfile = resolve_options.overrides.is_none();
+
+    let depends = if use_lockfile {
+        if let Some(lock) = read_package_lock(&lockfile_path) {
+            eprintln!("Using existing package-lock.json");
+            deps_from_lockfile(&lock)
+        } else {
+            // No lockfile, resolve fresh
+            let dependencies = path_to_dependencies(root_path, opts.include_dev)?;
+
+            let spinner = ProgressBar::new_spinner()
+                .with_style(
+                    ProgressStyle::default_spinner()
+                        .template("{spinner:.cyan} {msg}")
+                        .unwrap(),
+                )
+                .with_finish(ProgressFinish::AndClear);
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+            spinner.set_message("Resolving dependencies...");
+
+            let depends = calculate_depends_with_options(
+                &client,
+                &root,
+                &dependencies,
+                |name, version| {
+                    spinner.set_message(format!("Resolving {}@{}", name, version));
+                },
+                &Default::default(),
+                &resolve_options,
+            )
+            .await?;
+
+            spinner.finish_and_clear();
+
+            // Print maturity fallback warnings
+            for (dep, info) in &depends {
+                if let Some(fallback) = &info.maturity_fallback {
+                    eprintln!(
+                        "{} {}@{} skipped (published {}, requires {} maturity) -> using {}",
+                        "warn:".if_supports_color(Stream::Stderr, |s| s.yellow()),
+                        dep.name,
+                        fallback.skipped_version,
+                        fallback.format_age(),
+                        fallback.format_required(),
+                        dep.resolved
+                    );
+                }
+            }
+
+            // Write package-lock.json
+            if !opts.no_package_lock {
+                let lock = build_package_lock(&root.name, &root.resolved, &depends);
+                write_package_lock(&lockfile_path, &lock)?;
+                eprintln!("Created package-lock.json");
+            }
+
+            depends
+        }
     } else {
+        // Overrides configured - always re-resolve to apply them
         let dependencies = path_to_dependencies(root_path, opts.include_dev)?;
 
-        // Spinner for resolution phase
         let spinner = ProgressBar::new_spinner()
             .with_style(
                 ProgressStyle::default_spinner()
@@ -448,7 +576,7 @@ async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
             )
             .with_finish(ProgressFinish::AndClear);
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-        spinner.set_message("Resolving dependencies...");
+        spinner.set_message("Resolving dependencies (applying overrides)...");
 
         let depends = calculate_depends_with_options(
             &client,
@@ -483,7 +611,7 @@ async fn install(root_path: &Path, opts: &InstallOptions) -> Result<()> {
         if !opts.no_package_lock {
             let lock = build_package_lock(&root.name, &root.resolved, &depends);
             write_package_lock(&lockfile_path, &lock)?;
-            eprintln!("Created package-lock.json");
+            eprintln!("Updated package-lock.json with overrides");
         }
 
         depends

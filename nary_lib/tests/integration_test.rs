@@ -1,7 +1,7 @@
 use nary_lib::deps::*;
 use nary_lib::{
     calculate_depends_with_config, calculate_depends_with_options, create_client, MaturityConfig,
-    NpmrcConfig, RegistryConfig, ResolveOptions,
+    NpmrcConfig, OverridesConfig, RegistryConfig, ResolveOptions,
 };
 
 use indoc::indoc;
@@ -664,6 +664,7 @@ async fn it_applies_maturity_fallback_to_older_version() -> Result<()> {
         optimize: false,
         maturity: maturity_config,
         offline: false,
+        overrides: None,
     };
 
     let calculated =
@@ -762,6 +763,7 @@ async fn it_allows_new_packages_when_flag_set() -> Result<()> {
         optimize: false,
         maturity: maturity_config,
         offline: false,
+        overrides: None,
     };
 
     let calculated =
@@ -847,6 +849,7 @@ async fn it_errors_when_all_versions_too_new() -> Result<(), Box<dyn std::error:
         optimize: false,
         maturity: maturity_config,
         offline: false,
+        overrides: None,
     };
 
     let result =
@@ -990,4 +993,365 @@ fn test_lockfile_same_version_at_multiple_nested_paths() {
             "Dependency.install_path should match ResolvedInfo.install_path"
         );
     }
+}
+
+// ========== Override Tests ==========
+
+/// Test that a global override forces a specific version
+#[tokio::test]
+async fn it_applies_global_override_to_force_version() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // Package has two versions: 1.0.0 and 2.0.0
+    // Without override, ^1.0.0 would resolve to highest compatible (1.0.0)
+    // But we'll add an override to force 2.0.0
+    let pkg_metadata = r#"{
+        "name": "override-test-pkg",
+        "versions": {
+            "1.0.0": {
+                "name": "override-test-pkg",
+                "version": "1.0.0",
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/override-test-pkg/-/override-test-pkg-1.0.0.tgz",
+                    "integrity": "sha512-abc"
+                }
+            },
+            "2.0.0": {
+                "name": "override-test-pkg",
+                "version": "2.0.0",
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/override-test-pkg/-/override-test-pkg-2.0.0.tgz",
+                    "integrity": "sha512-def"
+                }
+            }
+        }
+    }"#;
+
+    let pkg_v2_metadata = r#"{
+        "name": "override-test-pkg",
+        "version": "2.0.0",
+        "dist": {
+            "tarball": "https://registry.npmjs.org/override-test-pkg/-/override-test-pkg-2.0.0.tgz",
+            "integrity": "sha512-def"
+        }
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/override-test-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(pkg_metadata))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/override-test-pkg/2.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(pkg_v2_metadata))
+        .mount(&mock_server)
+        .await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+        install_path: None,
+    };
+
+    // Request ^1.0.0 but override to force 2.0.0
+    let dependencies = vec![Dependency {
+        name: "override-test-pkg".to_string(),
+        requested: "^1.0.0".to_string(), // Would normally get 1.0.0
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+        install_path: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    // Create override to force 2.0.0
+    let overrides = serde_json::json!({
+        "override-test-pkg": "2.0.0"
+    });
+    let overrides_config = OverridesConfig::parse(&overrides, &std::collections::HashMap::new());
+
+    let options = ResolveOptions {
+        optimize: false,
+        maturity: MaturityConfig::disabled(),
+        offline: false,
+        overrides: Some(overrides_config),
+    };
+
+    let calculated =
+        calculate_depends_with_options(&client, &root, &dependencies, |_, _| {}, &config, &options)
+            .await?;
+
+    // Should resolve to 2.0.0 due to override, not 1.0.0
+    let pkg = calculated
+        .keys()
+        .find(|d| d.name == "override-test-pkg")
+        .expect("override-test-pkg should be resolved");
+    assert_eq!(pkg.resolved, "2.0.0", "Override should force version 2.0.0");
+
+    Ok(())
+}
+
+/// Test that a nested override only applies to the specific parent path
+#[tokio::test]
+async fn it_applies_nested_override_only_under_parent() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    // parent-pkg depends on child-pkg
+    let parent_metadata = r#"{
+        "name": "parent-pkg",
+        "versions": {
+            "1.0.0": {
+                "name": "parent-pkg",
+                "version": "1.0.0",
+                "dependencies": {
+                    "child-pkg": "^1.0.0"
+                },
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/parent-pkg/-/parent-pkg-1.0.0.tgz",
+                    "integrity": "sha512-parent"
+                }
+            }
+        }
+    }"#;
+
+    let parent_v1_metadata = r#"{
+        "name": "parent-pkg",
+        "version": "1.0.0",
+        "dependencies": {
+            "child-pkg": "^1.0.0"
+        },
+        "dist": {
+            "tarball": "https://registry.npmjs.org/parent-pkg/-/parent-pkg-1.0.0.tgz",
+            "integrity": "sha512-parent"
+        }
+    }"#;
+
+    let child_metadata = r#"{
+        "name": "child-pkg",
+        "versions": {
+            "1.0.0": {
+                "name": "child-pkg",
+                "version": "1.0.0",
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/child-pkg/-/child-pkg-1.0.0.tgz",
+                    "integrity": "sha512-child1"
+                }
+            },
+            "1.5.0": {
+                "name": "child-pkg",
+                "version": "1.5.0",
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/child-pkg/-/child-pkg-1.5.0.tgz",
+                    "integrity": "sha512-child15"
+                }
+            }
+        }
+    }"#;
+
+    let child_v15_metadata = r#"{
+        "name": "child-pkg",
+        "version": "1.5.0",
+        "dist": {
+            "tarball": "https://registry.npmjs.org/child-pkg/-/child-pkg-1.5.0.tgz",
+            "integrity": "sha512-child15"
+        }
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/parent-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(parent_metadata))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/parent-pkg/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(parent_v1_metadata))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/child-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(child_metadata))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/child-pkg/1.5.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(child_v15_metadata))
+        .mount(&mock_server)
+        .await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+        install_path: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "parent-pkg".to_string(),
+        requested: "^1.0.0".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+        install_path: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    // Override child-pkg to 1.5.0, but only when under parent-pkg
+    let overrides = serde_json::json!({
+        "parent-pkg": {
+            "child-pkg": "1.5.0"
+        }
+    });
+    let overrides_config = OverridesConfig::parse(&overrides, &std::collections::HashMap::new());
+
+    let options = ResolveOptions {
+        optimize: false,
+        maturity: MaturityConfig::disabled(),
+        offline: false,
+        overrides: Some(overrides_config),
+    };
+
+    let calculated =
+        calculate_depends_with_options(&client, &root, &dependencies, |_, _| {}, &config, &options)
+            .await?;
+
+    // child-pkg should be 1.5.0 because it's under parent-pkg
+    let child = calculated
+        .keys()
+        .find(|d| d.name == "child-pkg")
+        .expect("child-pkg should be resolved");
+    assert_eq!(
+        child.resolved, "1.5.0",
+        "Nested override should force child-pkg to 1.5.0 under parent-pkg"
+    );
+
+    Ok(())
+}
+
+/// Test that $reference syntax resolves from root dependencies
+#[tokio::test]
+async fn it_resolves_override_reference_syntax() -> Result<()> {
+    // Isolate from real cache
+    let _temp = TempDir::new().unwrap();
+    std::env::set_var("HOME", _temp.path());
+
+    let mock_server = MockServer::start().await;
+
+    let pkg_metadata = r#"{
+        "name": "ref-test-pkg",
+        "versions": {
+            "17.0.2": {
+                "name": "ref-test-pkg",
+                "version": "17.0.2",
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/ref-test-pkg/-/ref-test-pkg-17.0.2.tgz",
+                    "integrity": "sha512-17"
+                }
+            },
+            "18.2.0": {
+                "name": "ref-test-pkg",
+                "version": "18.2.0",
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/ref-test-pkg/-/ref-test-pkg-18.2.0.tgz",
+                    "integrity": "sha512-18"
+                }
+            }
+        }
+    }"#;
+
+    let pkg_v17_metadata = r#"{
+        "name": "ref-test-pkg",
+        "version": "17.0.2",
+        "dist": {
+            "tarball": "https://registry.npmjs.org/ref-test-pkg/-/ref-test-pkg-17.0.2.tgz",
+            "integrity": "sha512-17"
+        }
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/ref-test-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(pkg_metadata))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/ref-test-pkg/17.0.2"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(pkg_v17_metadata))
+        .mount(&mock_server)
+        .await;
+
+    let root = Dependency {
+        name: "test-root".to_string(),
+        requested: "1.0.0".to_string(),
+        resolved: "1.0.0".to_string(),
+        is_optional: false,
+        alias: None,
+        install_path: None,
+    };
+
+    let dependencies = vec![Dependency {
+        name: "ref-test-pkg".to_string(),
+        requested: "*".to_string(),
+        resolved: String::new(),
+        is_optional: false,
+        alias: None,
+        install_path: None,
+    }];
+
+    let config = RegistryConfig::with_registry(mock_server.uri());
+    let client = create_client()?;
+
+    // Use $ref-test-pkg syntax - should resolve from root_deps
+    let overrides = serde_json::json!({
+        "ref-test-pkg": "$ref-test-pkg"
+    });
+
+    // Simulate root deps having ref-test-pkg: "^17.0.0"
+    let mut root_deps = std::collections::HashMap::new();
+    root_deps.insert("ref-test-pkg".to_string(), "^17.0.0".to_string());
+
+    let overrides_config = OverridesConfig::parse(&overrides, &root_deps);
+
+    let options = ResolveOptions {
+        optimize: false,
+        maturity: MaturityConfig::disabled(),
+        offline: false,
+        overrides: Some(overrides_config),
+    };
+
+    let calculated =
+        calculate_depends_with_options(&client, &root, &dependencies, |_, _| {}, &config, &options)
+            .await?;
+
+    // Should resolve to 17.0.2 (highest matching ^17.0.0 from root deps)
+    let pkg = calculated
+        .keys()
+        .find(|d| d.name == "ref-test-pkg")
+        .expect("ref-test-pkg should be resolved");
+    assert_eq!(
+        pkg.resolved, "17.0.2",
+        "$reference should resolve using root dependency version"
+    );
+
+    Ok(())
 }

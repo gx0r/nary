@@ -14,7 +14,9 @@ pub mod error;
 pub use error::{Error, Result};
 
 pub mod config;
-pub use config::{get_global_dir, NpmrcConfig, RegistryConfig, DEFAULT_REGISTRY};
+pub use config::{
+    get_global_dir, NpmrcConfig, OverridesConfig, RegistryConfig, ResolvedPackage, DEFAULT_REGISTRY,
+};
 
 mod pack;
 use crate::pack::{gunzip, unpack_archive};
@@ -33,8 +35,8 @@ pub use crate::cache::{
 pub mod deps;
 pub use deps::{
     calculate_depends, calculate_depends_with_config, calculate_depends_with_options,
-    parse_package_spec, path_to_dependencies, path_to_root_dependency, Dependency, ResolveOptions,
-    ResolvedInfo,
+    parse_overrides_from_json, parse_package_spec, path_to_dependencies, path_to_overrides,
+    path_to_root_dependency, Dependency, ResolveOptions, ResolvedInfo,
 };
 
 pub mod lockfile;

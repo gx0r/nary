@@ -1,9 +1,11 @@
 mod npmrc;
+mod overrides;
 mod registry;
 
 use std::path::PathBuf;
 
 pub use npmrc::NpmrcConfig;
+pub use overrides::{OverrideRule, OverridesConfig, ResolvedPackage};
 pub use registry::RegistryConfig;
 
 /// Default npm registry

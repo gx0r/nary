@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::{fs::File, io, path::Path, sync::Arc};
 use tokio::sync::watch;
 
-use crate::config::RegistryConfig;
+use crate::config::{OverridesConfig, RegistryConfig, ResolvedPackage};
 use crate::error::{FileReadSnafu, JsonParseSnafu, OfflineMetadataNotCachedSnafu, Result};
 use crate::{
     fetch_matching_version_metadata_with_maturity,
@@ -509,6 +509,8 @@ pub struct ResolveOptions {
     pub maturity: MaturityConfig,
     /// Offline mode: only use cached packages, fail if not available
     pub offline: bool,
+    /// npm overrides configuration for forcing specific versions
+    pub overrides: Option<OverridesConfig>,
 }
 
 pub async fn calculate_depends<F>(
@@ -591,17 +593,19 @@ where
     // Track tree structure for Phase 3: (parent_path, dep, resolved_info)
     let mut tree_entries: Vec<(String, Dependency, ResolvedDepInfo)> = Vec::new();
 
-    // BFS through tree
-    let mut pending: Vec<(String, Vec<Dependency>)> = vec![("".to_string(), deps.to_vec())];
+    // BFS through tree - now tracks (parent_install_path, resolution_path, deps)
+    // resolution_path is the chain of resolved packages (with versions) for override matching
+    let mut pending: Vec<(String, Vec<ResolvedPackage>, Vec<Dependency>)> =
+        vec![("".to_string(), vec![], deps.to_vec())];
     let mut seen_ranges: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
 
     while !pending.is_empty() {
-        let mut to_resolve: Vec<(String, Dependency)> = Vec::new();
+        let mut to_resolve: Vec<(String, Vec<ResolvedPackage>, Dependency)> = Vec::new();
 
-        for (parent_path, parent_deps) in &pending {
+        for (parent_path, resolution_path, parent_deps) in &pending {
             for dep in parent_deps {
-                to_resolve.push((parent_path.clone(), dep.clone()));
+                to_resolve.push((parent_path.clone(), resolution_path.clone(), dep.clone()));
             }
         }
 
@@ -609,13 +613,34 @@ where
             break;
         }
 
-        // Extract deps that need metadata fetching
+        // Apply overrides and extract deps that need metadata fetching
         let deps_needing_fetch: Vec<Dependency> = to_resolve
             .iter()
-            .filter(|(_, d)| {
-                !resolved_metadata.contains_key(&(d.name.clone(), d.requested.clone()))
+            .filter_map(|(_, resolution_path, d)| {
+                // Apply override if configured
+                let effective_requested = match &options.overrides {
+                    Some(cfg) => cfg
+                        .find_override(&d.name, resolution_path)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| d.requested.clone()),
+                    None => d.requested.clone(),
+                };
+
+                let key = (d.name.clone(), effective_requested.clone());
+                if resolved_metadata.contains_key(&key) {
+                    None
+                } else {
+                    // Create dep with effective requested version
+                    Some(Dependency {
+                        name: d.name.clone(),
+                        requested: effective_requested,
+                        resolved: d.resolved.clone(),
+                        is_optional: d.is_optional,
+                        alias: d.alias.clone(),
+                        install_path: d.install_path.clone(),
+                    })
+                }
             })
-            .map(|(_, d)| d.clone())
             .collect();
 
         // Fetch metadata in parallel
@@ -633,19 +658,25 @@ where
         }
 
         // Collect requirements and prepare next level
-        let mut next_pending: Vec<(String, Vec<Dependency>)> = Vec::new();
+        let mut next_pending: Vec<(String, Vec<ResolvedPackage>, Vec<Dependency>)> = Vec::new();
 
-        for (parent_path, unresolved_dep) in &to_resolve {
-            let metadata_key = (
-                unresolved_dep.name.clone(),
-                unresolved_dep.requested.clone(),
-            );
+        for (parent_path, resolution_path, unresolved_dep) in &to_resolve {
+            // Apply override if configured
+            let effective_requested = match &options.overrides {
+                Some(cfg) => cfg
+                    .find_override(&unresolved_dep.name, resolution_path)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| unresolved_dep.requested.clone()),
+                None => unresolved_dep.requested.clone(),
+            };
 
-            // Track this requirement
+            let metadata_key = (unresolved_dep.name.clone(), effective_requested.clone());
+
+            // Track this requirement (with effective version)
             all_requirements
                 .entry(unresolved_dep.name.clone())
                 .or_default()
-                .push(unresolved_dep.requested.clone());
+                .push(effective_requested.clone());
 
             let Some(info) = resolved_metadata.get(&metadata_key) else {
                 continue;
@@ -658,20 +689,24 @@ where
                 continue;
             }
 
-            // Store for Phase 3
+            // Store for Phase 3 (with original dep but resolved from effective version)
             tree_entries.push((parent_path.clone(), unresolved_dep.clone(), info.clone()));
 
             // Queue transitive deps (using a placeholder path for now)
-            let range_key = (
-                unresolved_dep.name.clone(),
-                unresolved_dep.requested.clone(),
-            );
+            let range_key = (unresolved_dep.name.clone(), effective_requested);
             if !seen_ranges.contains(&range_key) {
                 seen_ranges.insert(range_key);
                 if !info.transitive_deps.is_empty() {
+                    // Extend resolution_path with this package (name + resolved version)
+                    let mut new_resolution_path = resolution_path.clone();
+                    new_resolution_path.push(ResolvedPackage {
+                        name: info.resolved_dep.name.clone(),
+                        version: info.resolved_dep.resolved.clone(),
+                    });
                     // Use placeholder path - will be computed in Phase 3
                     next_pending.push((
                         format!("__placeholder__/{}", info.resolved_dep.name),
+                        new_resolution_path,
                         info.transitive_deps.to_vec(),
                     ));
                 }
@@ -701,15 +736,16 @@ where
     let mut installed: std::collections::BTreeMap<InstallKey, (Dependency, ResolvedInfo)> =
         std::collections::BTreeMap::new();
 
-    // Re-traverse the tree with correct parent paths
-    let mut pending: Vec<(String, Vec<Dependency>)> = vec![("".to_string(), deps.to_vec())];
+    // Re-traverse the tree with correct parent paths and resolution paths
+    let mut pending: Vec<(String, Vec<ResolvedPackage>, Vec<Dependency>)> =
+        vec![("".to_string(), vec![], deps.to_vec())];
 
     while !pending.is_empty() {
-        let mut to_resolve: Vec<(String, Dependency)> = Vec::new();
+        let mut to_resolve: Vec<(String, Vec<ResolvedPackage>, Dependency)> = Vec::new();
 
-        for (parent_path, parent_deps) in &pending {
+        for (parent_path, resolution_path, parent_deps) in &pending {
             for dep in parent_deps {
-                to_resolve.push((parent_path.clone(), dep.clone()));
+                to_resolve.push((parent_path.clone(), resolution_path.clone(), dep.clone()));
             }
         }
 
@@ -717,13 +753,19 @@ where
             break;
         }
 
-        let mut next_pending: Vec<(String, Vec<Dependency>)> = Vec::new();
+        let mut next_pending: Vec<(String, Vec<ResolvedPackage>, Vec<Dependency>)> = Vec::new();
 
-        for (parent_path, unresolved_dep) in &to_resolve {
-            let metadata_key = (
-                unresolved_dep.name.clone(),
-                unresolved_dep.requested.clone(),
-            );
+        for (parent_path, resolution_path, unresolved_dep) in &to_resolve {
+            // Apply override if configured
+            let effective_requested = match &options.overrides {
+                Some(cfg) => cfg
+                    .find_override(&unresolved_dep.name, resolution_path)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| unresolved_dep.requested.clone()),
+                None => unresolved_dep.requested.clone(),
+            };
+
+            let metadata_key = (unresolved_dep.name.clone(), effective_requested.clone());
 
             let Some(info) = resolved_metadata.get(&metadata_key) else {
                 continue;
@@ -752,7 +794,7 @@ where
                 format!("{}/node_modules/{}", parent_path, resolved_dep.name)
             } else if let Some((hoisted_version, hoisted_path)) = hoisted.get(&resolved_dep.name) {
                 // Package already hoisted - check if we can reuse
-                let can_reuse = if let Ok(range) = unresolved_dep.requested.parse::<Range>() {
+                let can_reuse = if let Ok(range) = effective_requested.parse::<Range>() {
                     if let Ok(version) = hoisted_version.parse::<Version>() {
                         version.satisfies(&range)
                     } else {
@@ -812,7 +854,17 @@ where
             all_peer_deps.extend(info.peer_deps.to_vec());
 
             if !info.transitive_deps.is_empty() {
-                next_pending.push((install_path, info.transitive_deps.to_vec()));
+                // Extend resolution_path with this package (name + resolved version)
+                let mut new_resolution_path = resolution_path.clone();
+                new_resolution_path.push(ResolvedPackage {
+                    name: resolved_dep.name.clone(),
+                    version: resolved_dep.resolved.clone(),
+                });
+                next_pending.push((
+                    install_path,
+                    new_resolution_path,
+                    info.transitive_deps.to_vec(),
+                ));
             }
         }
 
@@ -827,6 +879,13 @@ where
 
     // Check peer dependencies and print warnings
     check_peer_dependencies(&all_peer_deps, &ordered_dependencies);
+
+    // Print warnings for overrides that were never applied
+    if let Some(cfg) = &options.overrides {
+        for warning in cfg.get_unapplied_warnings() {
+            eprintln!("warn: {}", warning);
+        }
+    }
 
     Ok(ordered_dependencies)
 }
@@ -868,6 +927,68 @@ pub fn path_to_dependencies(file: &Path, include_dev: bool) -> Result<Vec<Depend
     })?;
 
     json_to_dependencies(&package_json, include_dev, &package.display().to_string())
+}
+
+/// Parse overrides from package.json file
+///
+/// Returns None if:
+/// - The file doesn't exist or can't be read
+/// - The "overrides" field is missing
+/// - The "overrides" field is empty
+pub fn path_to_overrides(file: &Path) -> Option<OverridesConfig> {
+    let mut package = file.to_path_buf();
+
+    if !package.ends_with("package.json") {
+        package.push("package.json");
+    }
+
+    let package_json = File::open(&package).ok()?;
+    let root: Value = serde_json::from_reader(package_json).ok()?;
+
+    parse_overrides_from_json(&root)
+}
+
+/// Parse overrides from a parsed package.json Value
+///
+/// Returns None if "overrides" field is missing or empty
+pub fn parse_overrides_from_json(root: &Value) -> Option<OverridesConfig> {
+    let overrides_value = root.get("overrides")?;
+
+    // Build root deps map for $reference resolution
+    let root_deps = build_root_deps_map(root);
+
+    let config = OverridesConfig::parse(overrides_value, &root_deps);
+
+    if config.is_empty() {
+        None
+    } else {
+        Some(config)
+    }
+}
+
+/// Build a map of root dependencies for $reference syntax resolution
+fn build_root_deps_map(root: &Value) -> std::collections::HashMap<String, String> {
+    let mut deps = std::collections::HashMap::new();
+
+    // Collect from dependencies
+    if let Some(obj) = root["dependencies"].as_object() {
+        for (name, version) in obj {
+            if let Some(v) = version.as_str() {
+                deps.insert(name.clone(), v.to_string());
+            }
+        }
+    }
+
+    // Collect from devDependencies
+    if let Some(obj) = root["devDependencies"].as_object() {
+        for (name, version) in obj {
+            if let Some(v) = version.as_str() {
+                deps.insert(name.clone(), v.to_string());
+            }
+        }
+    }
+
+    deps
 }
 
 pub fn json_to_dependencies(

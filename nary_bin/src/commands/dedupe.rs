@@ -5,8 +5,8 @@ use std::path::Path;
 
 use nary_lib::{
     build_package_lock, calculate_depends_with_options, cleanup_empty_dirs, create_client,
-    deps_from_lockfile, path_to_dependencies, path_to_root_dependency, read_package_lock,
-    write_package_lock, MaturityConfig, RegistryConfig, ResolveOptions,
+    deps_from_lockfile, path_to_dependencies, path_to_overrides, path_to_root_dependency,
+    read_package_lock, write_package_lock, MaturityConfig, RegistryConfig, ResolveOptions,
 };
 
 use crate::error::{NoLockfileSnafu, Result};
@@ -24,10 +24,14 @@ pub async fn run_dedupe(args: &DedupeArgs) -> Result<()> {
     let root = path_to_root_dependency(root_path)?;
     let dependencies = path_to_dependencies(root_path, true)?;
 
+    // Parse overrides from package.json (dedupe should respect overrides)
+    let overrides = path_to_overrides(root_path);
+
     let options = ResolveOptions {
         optimize: args.optimize,
         maturity: MaturityConfig::disabled(), // Dedupe operates on already-installed packages
         offline: false,                       // Dedupe may need fresh metadata for resolution
+        overrides,
     };
 
     if args.optimize {
